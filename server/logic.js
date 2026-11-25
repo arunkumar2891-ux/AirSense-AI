@@ -1,6 +1,6 @@
 // ---------- AQI classification (US EPA) ----------
 export function getAQIStatus(value) {
-  if (value === null || value === undefined || value === "" || !Number.isFinite(Number(value))) return { label: "Unavailable", color: "slate", level: 0, advice: "Live AQI is unavailable. Check your local monitoring authority." };
+  if (value === null || value === undefined || value === "" || !Number.isFinite(Number(value)) || Number(value) < 0) return { label: "Unavailable", color: "slate", level: 0, advice: "Live AQI is unavailable. Check your local monitoring authority." };
   const aqi = Number(value);
   if (aqi <= 50) return { label: "Good", color: "green", level: 1, advice: "Air quality is generally satisfactory for outdoor activities." };
   if (aqi <= 100) return { label: "Moderate", color: "yellow", level: 2, advice: "Most people can continue usual activities; unusually sensitive people should monitor symptoms." };
@@ -46,7 +46,7 @@ export function getDataFreshness(observedAt) {
 // ---------- Exposure decision engine ----------
 export function buildExposureDecision(air = {}, profile = {}) {
   const aqi = air.aqi !== null && air.aqi !== undefined && air.aqi !== "" ? Number(air.aqi) : null;
-  const aqiValid = aqi !== null && Number.isFinite(aqi);
+  const aqiValid = aqi !== null && Number.isFinite(aqi) && aqi >= 0;
   const aqiStatus = getAQIStatus(aqi);
   const pm25 = air.pollutants?.pm25;
   const pm25Status = getPM25Status(pm25);
@@ -72,16 +72,20 @@ export function buildExposureDecision(air = {}, profile = {}) {
       limitations: "AQI unavailable from provider. No forecast or historical trend can substitute for current readings. Always follow official local public-health advisories.",
     };
   }
-  if (freshness.state === "stale") {
+  if (freshness.state === "stale" || freshness.state === "unknown") {
     return {
       overallRisk: "unknown",
       activityRecommendation: "insufficient_data",
-      recommendedAction: "Refresh the data or check a local monitoring station. Available readings are too old.",
-      reasoning: `Readings are ${Math.round(freshness.ageMs / 3600000)} hours old. Air quality can change significantly within hours.`,
-      sensitiveGroupAdvice: isSensitive ? "Treat stale data with extra caution — sensitive individuals should default to indoor options." : "Refresh for a reliable reading.",
-      alternativeActivity: "Indoor activities until fresh data is available.",
+      recommendedAction: freshness.state === "stale"
+        ? "Refresh the data or check a local monitoring station. Available readings are too old."
+        : "Check a local regulatory monitoring station. The observation time is missing, invalid, or in the future.",
+      reasoning: freshness.state === "stale"
+        ? `Readings are ${Math.round(freshness.ageMs / 3600000)} hours old. Air quality can change significantly within hours.`
+        : "A trustworthy observation time is required before making a current environmental exposure recommendation.",
+      sensitiveGroupAdvice: isSensitive ? "Treat unverified data with extra caution and consult official local guidance." : "Refresh for a time-verified reading.",
+      alternativeActivity: "Consider indoor activities until time-verified environmental data is available.",
       dataFreshness: freshness,
-      limitations: `Data staleness (${freshness.state}) prevents reliable exposure assessment.`,
+      limitations: `Data freshness (${freshness.state}) prevents a reliable environmental exposure assessment. This is not medical advice; follow official local public-health advisories.`,
     };
   }
 
@@ -106,13 +110,14 @@ export function buildExposureDecision(air = {}, profile = {}) {
   const windSpeed = Number(air.weather?.wind_speed_10m);
   if (Number.isFinite(windSpeed) && windSpeed < 5) riskScore += 0.5;
 
-  // Forecast trend (if available)
+  // Forecast trend is context only. Forecasts must never change the current
+  // exposure recommendation, which is based on current observed/modelled data.
   let forecastNote = "";
   if (hasForecast && hourly) {
     const futureAQI = hourly.slice(0, 6).map((h) => h.aqi).filter((v) => v !== null);
     if (futureAQI.length > 0) {
       const maxFuture = Math.max(...futureAQI);
-      if (maxFuture > aqi) { riskScore += 0.5; forecastNote = " Forecast suggests conditions may worsen."; }
+      if (maxFuture > aqi) { forecastNote = " Forecast suggests conditions may worsen."; }
       else if (maxFuture < aqi) { forecastNote = " Forecast suggests conditions may improve."; }
     }
   }
@@ -143,6 +148,23 @@ export function buildExposureDecision(air = {}, profile = {}) {
     overallRisk = "very_high";
     activityRecommendation = "avoid";
     recommendedAction = `Avoid outdoor ${activity}. Move indoors and follow official public-health advisories.`;
+  }
+
+  // Conservative AQI-category floors apply independently of PM2.5
+  // availability. PM2.5 may elevate a recommendation but its absence cannot
+  // weaken the minimum recommendation implied by the reported US AQI.
+  const recommendationRank = { suitable: 0, caution: 1, avoid: 2 };
+  const categoryFloor = aqiStatus.level >= 5
+    ? "avoid"
+    : aqiStatus.level >= 3
+      ? "caution"
+      : "suitable";
+  if (recommendationRank[activityRecommendation] < recommendationRank[categoryFloor]) {
+    activityRecommendation = categoryFloor;
+    overallRisk = categoryFloor === "avoid" ? "very_high" : "high";
+    recommendedAction = categoryFloor === "avoid"
+      ? `Avoid outdoor ${activity}. Move indoors and follow official public-health advisories.`
+      : `Reduce the intensity or duration of ${activity} and consider an indoor alternative.`;
   }
 
   // ---------- Sensitive group override ----------
@@ -195,14 +217,28 @@ export function buildExposureDecision(air = {}, profile = {}) {
   };
 }
 
+export function buildDeterministicAnswer(air = {}, decision) {
+  if (!decision) return "No environmental exposure recommendation is available.";
+  const aqiText = Number.isFinite(Number(air.aqi)) && Number(air.aqi) >= 0
+    ? `The reported ${air.aqiScale || "AQI"} is ${Number(air.aqi)} (${getAQIStatus(air.aqi).label}).`
+    : "Current air-quality data is unavailable.";
+  return [
+    aqiText,
+    `Environmental exposure recommendation: ${decision.activityRecommendation.replace("_", " ")}.`,
+    decision.recommendedAction,
+    decision.reasoning,
+    "This is an environmental exposure recommendation, not medical advice.",
+  ].filter(Boolean).join(" ");
+}
+
 // ---------- Legacy compatibility (used by Gemini system prompt) ----------
-export function buildRecommendationContext(air = {}, profile = {}, question = "") {
+export function buildRecommendationContext(air = {}, profile = {}, question = "", decision = null) {
   const aqi = Number(air.aqi);
   const status = getAQIStatus(aqi);
   const activity = String(profile.activity || "daily activities");
   const sensitivity = String(profile.sensitivity || "general");
   const ageGroup = String(profile.ageGroup || "adult");
-  const valid = air.aqi !== null && air.aqi !== undefined && air.aqi !== "" && Number.isFinite(aqi);
+  const valid = air.aqi !== null && air.aqi !== undefined && air.aqi !== "" && Number.isFinite(aqi) && aqi >= 0;
   let recommendation = valid ? status.advice : "I don't have a current AQI reading, so I can't make a live exposure recommendation. Check an official local monitor.";
   if (valid && aqi > 100 && ["running", "cycling", "outdoor workout", "sports"].includes(activity.toLowerCase())) {
     recommendation += " Because you plan vigorous outdoor activity, choose an indoor session or wait for a lower reading.";
@@ -210,6 +246,8 @@ export function buildRecommendationContext(air = {}, profile = {}, question = ""
   if (valid && aqi > 100 && (sensitivity !== "general" || ageGroup === "child" || ageGroup === "older adult")) {
     recommendation += " Take extra care because the selected profile may be more sensitive to air pollution.";
   }
-  const answer = `${valid ? `The reported ${air.aqiScale || "AQI"} is ${aqi} (${status.label}).` : "Current air quality data is unavailable."} ${recommendation} ${air.pollutants?.pm25 != null ? `PM2.5 is ${air.pollutants.pm25} µg/m³.` : ""} ${air.attribution || ""}`.trim();
+  const answer = decision
+    ? buildDeterministicAnswer(air, decision)
+    : `${valid ? `The reported ${air.aqiScale || "AQI"} is ${aqi} (${status.label}).` : "Current air quality data is unavailable."} ${recommendation} ${air.pollutants?.pm25 != null ? `PM2.5 is ${air.pollutants.pm25} µg/m³.` : ""} ${air.attribution || ""}`.trim();
   return { aqi: valid ? aqi : null, category: status.label, activity, sensitivity, ageGroup, recommendation, question, answer };
 }

@@ -28,6 +28,16 @@ function loadSession(key: string): LocState | null {
   return null;
 }
 
+function formatAtLocation(value: string, timezone: string, options: Intl.DateTimeFormatOptions) {
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return "Unavailable";
+  try {
+    return date.toLocaleTimeString([], { ...options, timeZone: timezone });
+  } catch {
+    return date.toLocaleTimeString([], { ...options, timeZone: "UTC", timeZoneName: "short" });
+  }
+}
+
 function App() {
   const [loc, setLoc] = useState<LocState>({ lat: fallbackCity.lat, lon: fallbackCity.lon, label: fallbackCity.name, source: "default" });
   const [air, setAir] = useState<AirData | null>(null);
@@ -159,7 +169,10 @@ function App() {
     return () => document.removeEventListener("mousedown", onClick);
   }, []);
 
-  const chartData = useMemo(() => air?.hourly.map((item) => ({ ...item, hour: new Date(item.time).toLocaleTimeString([], { hour: "numeric" }) })) || [], [air]);
+  const chartData = useMemo(() => air?.hourly.map((item) => ({
+    ...item,
+    hour: formatAtLocation(item.time, air.location.timezone, { hour: "numeric" }),
+  })) || [], [air]);
 
   async function submit(q = question) {
     if (!q.trim() || !air) return;
@@ -197,7 +210,7 @@ function App() {
           <span className="live-pill"><i/> LIVE DATA</span>
           {loc.source === "manual" && <button className="return-gps" onClick={returnToGps} disabled={geoBusy}><Crosshair size={12}/> Back to my location</button>}
         </div>
-        <span className="muted">{air?.observedAt ? `Updated ${new Date(air.observedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : "Waiting for data"}</span>
+        <span className="muted">{air?.observedAt ? `Updated ${formatAtLocation(air.observedAt, air.location.timezone, { hour: "2-digit", minute: "2-digit" })}` : "Observation time unavailable"}</span>
       </section>
 
       <div className="search-row" ref={searchBoxRef}>

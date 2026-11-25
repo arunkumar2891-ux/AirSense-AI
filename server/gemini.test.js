@@ -10,10 +10,8 @@ let lastPrompt = "";
 const VALID_STRUCTURED = {
   summary: "US AQI is 172 (Unhealthy for sensitive groups).",
   airQualityAssessment: "PM2.5 is 55.4 µg/m³, elevated.",
-  recommendedAction: "Reduce prolonged outdoor exertion.",
+  recommendation: "avoid",
   reasoning: "AQI 172 exceeds the moderate band.",
-  activityAdvice: "Consider indoor training instead.",
-  precautions: "Sensitive groups should avoid outdoor exertion.",
   confidence: "medium — modelled data only.",
   dataLimitations: "Model estimate, not a regulatory station reading.",
 };
@@ -27,7 +25,9 @@ class FakeModels {
       return { text: JSON.stringify(VALID_STRUCTURED) };
     }
     if (b === "invalid") return { text: "not json at all" };
-    if (b === "contradiction") return { text: JSON.stringify({ ...VALID_STRUCTURED, recommendedAction: "Conditions are safe and favorable for a run.", activityAdvice: "Enjoy your outdoor run." }) };
+    if (b === "contradiction") return { text: JSON.stringify({ ...VALID_STRUCTURED, recommendation: "suitable", summary: "Conditions are safe and favorable for a run." }) };
+    if (b === "semanticContradiction") return { text: JSON.stringify({ ...VALID_STRUCTURED, recommendation: "suitable", summary: "Nothing in these conditions should alter the planned outing." }) };
+    if (b === "invalidRecommendation") return { text: JSON.stringify({ ...VALID_STRUCTURED, recommendation: "go_ahead" }) };
     if (b === "timeout") { const e = new Error("Request timed out"); e.name = "TimeoutError"; throw e; }
     if (b === "rateLimit") { const e = new Error("429 Too Many Requests"); e.status = 429; throw e; }
     if (b === "failThenSuccess") { const e = new Error("503 Service Unavailable"); e.status = 503; throw e; }
@@ -36,6 +36,7 @@ class FakeModels {
 }
 
 const { askGemini, AI_CONFIG, _setClientFactory } = await import("./gemini.js");
+const { buildExposureDecision, buildRecommendationContext } = await import("./logic.js");
 
 // Inject fake client, disable real sleep delays, and set a test API key.
 _setClientFactory(() => ({ models: new FakeModels() }));
@@ -65,7 +66,7 @@ test("valid structured response is parsed and formatted", async () => {
   assert.ok(result.structured);
   assert.equal(result.structured.summary, VALID_STRUCTURED.summary);
   assert.match(result.answer, /172/);
-  assert.match(result.answer, /Recommended:/);
+  assert.match(result.answer, /AI explanation:/);
 });
 
 test("invalid model response falls back to deterministic", async () => {
@@ -104,6 +105,19 @@ test("no API key returns rules mode without calling Gemini", async () => {
   assert.equal(result.mode, "rules");
   assert.equal(result.answer, context.answer);
   assert.equal(mockCalls.length, 0);
+});
+
+test("no-key fallback answer communicates the same recommendation as the decision", async () => {
+  AI_CONFIG.apiKey = "";
+  const air = { ...trusted, observedAt: new Date().toISOString() };
+  const profile = { activity: "running", ageGroup: "adult", sensitivity: "general" };
+  const decision = buildExposureDecision(air, profile);
+  const deterministicContext = buildRecommendationContext(air, profile, "Can I run?", decision);
+  const result = await askGemini("Can I run?", deterministicContext, air, decision);
+  assert.equal(result.mode, "rules");
+  assert.equal(result.decision.activityRecommendation, decision.activityRecommendation);
+  assert.match(result.answer, new RegExp(`recommendation: ${decision.activityRecommendation.replace("_", " ")}`, "i"));
+  assert.match(result.answer, /not medical advice/i);
 });
 
 test("API key never appears in logs", async () => {
@@ -145,8 +159,33 @@ test("Gemini contradicting deterministic decision is overridden", async () => {
     limitations: "Model data.",
   };
   const result = await askGemini("Can I run?", context, trusted, decision);
-  // AI said "safe" but rules say "avoid" → contradiction detected, structured nulled
+  // AI enum said "suitable" but rules say "avoid" → response discarded.
   assert.equal(result.structured, null);
-  assert.match(result.answer, /adjusted to align/i);
+  assert.equal(result.mode, "rules-fallback");
+  assert.equal(result.answer, context.answer);
+  assert.match(result.note, /discarded/i);
   assert.deepEqual(result.decision, decision);
+});
+
+test("semantic contradiction without obvious keywords is discarded by enum mismatch", async () => {
+  mockBehavior = { type: "semanticContradiction" };
+  const decision = {
+    overallRisk: "very_high", activityRecommendation: "avoid",
+    recommendedAction: "Avoid outdoor running.",
+    reasoning: "US AQI is unhealthy.",
+    sensitiveGroupAdvice: "Follow official guidance.", alternativeActivity: "Indoor exercise.",
+    dataFreshness: { state: "fresh", ageMs: 1000, label: "fresh" },
+    limitations: "Modelled data; not medical advice.",
+  };
+  const result = await askGemini("Can I run?", context, trusted, decision);
+  assert.equal(result.mode, "rules-fallback");
+  assert.equal(result.answer, context.answer);
+  assert.equal(result.structured, null);
+});
+
+test("invalid recommendation enum is rejected as malformed", async () => {
+  mockBehavior = { type: "invalidRecommendation" };
+  const result = await askGemini("Can I run?", context, trusted);
+  assert.equal(result.mode, "rules-fallback");
+  assert.equal(result.answer, context.answer);
 });

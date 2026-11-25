@@ -122,3 +122,79 @@ test("limitations always reference official advisories", () => {
     assert.match(d.limitations, /official.*advisor/i, "must reference official advisories");
   }
 });
+
+test("missing, invalid, and future observation times → insufficient_data", () => {
+  const cases = [null, "not-a-time", new Date(Date.now() + 60 * 60000).toISOString()];
+  for (const observedAt of cases) {
+    const d = buildExposureDecision(makeAir({ observedAt }), makeProfile());
+    assert.equal(d.dataFreshness.state, "unknown");
+    assert.equal(d.overallRisk, "unknown");
+    assert.equal(d.activityRecommendation, "insufficient_data");
+    assert.match(d.recommendedAction, /observation time|monitoring station/i);
+  }
+});
+
+test("AQI 160 with missing PM2.5 cannot be rated suitable", () => {
+  const d = buildExposureDecision(
+    makeAir({ aqi: 160, pollutants: { pm25: null } }),
+    makeProfile({ activity: "daily activities" }),
+  );
+  assert.ok(["caution", "avoid"].includes(d.activityRecommendation));
+  assert.notEqual(d.overallRisk, "low");
+});
+
+test("US AQI 201–299 has a conservative avoid floor even without PM2.5", () => {
+  for (const aqi of [201, 250, 299]) {
+    const d = buildExposureDecision(
+      makeAir({ aqi, pollutants: { pm25: null } }),
+      makeProfile({ activity: "daily activities" }),
+    );
+    assert.equal(d.activityRecommendation, "avoid", `AQI ${aqi}`);
+    assert.equal(d.overallRisk, "very_high", `AQI ${aqi}`);
+  }
+});
+
+test("negative and invalid AQI values → insufficient_data", () => {
+  for (const aqi of [-1, -50, "invalid", Number.NaN]) {
+    const d = buildExposureDecision(makeAir({ aqi }), makeProfile());
+    assert.equal(d.overallRisk, "unknown");
+    assert.equal(d.activityRecommendation, "insufficient_data");
+  }
+});
+
+test("forecast trend is informational and cannot change the current recommendation", () => {
+  const base = makeAir({ aqi: 50, pollutants: { pm25: 8 }, hourly: [] });
+  const worsening = makeAir({ ...base, hourly: [{ time: "future", aqi: 100 }] });
+  const withoutForecast = buildExposureDecision(base, makeProfile());
+  const withForecast = buildExposureDecision(worsening, makeProfile());
+  assert.equal(withForecast.activityRecommendation, withoutForecast.activityRecommendation);
+  assert.equal(withForecast.overallRisk, withoutForecast.overallRisk);
+  assert.match(withForecast.reasoning, /forecast suggests/i);
+});
+
+test("all allowed activity/profile combinations produce deterministic recommendations at boundaries", () => {
+  const activities = ["running", "cycling", "outdoor workout", "sports", "commuting", "daily activities", "children's outdoor play"];
+  const ageGroups = ["adult", "child", "older adult"];
+  const sensitivities = ["general", "respiratory sensitivity", "heart or lung condition"];
+  const boundaries = [0, 50, 51, 100, 101, 150, 151, 200, 201, 299, 300, 301, 500];
+  const allowed = new Set(["suitable", "caution", "avoid"]);
+
+  for (const activity of activities) {
+    for (const ageGroup of ageGroups) {
+      for (const sensitivity of sensitivities) {
+        for (const aqi of boundaries) {
+          const profile = { activity, ageGroup, sensitivity };
+          const air = makeAir({ aqi, pollutants: { pm25: null } });
+          const first = buildExposureDecision(air, profile);
+          const second = buildExposureDecision(air, profile);
+          assert.equal(first.activityRecommendation, second.activityRecommendation);
+          assert.equal(first.overallRisk, second.overallRisk);
+          assert.equal(first.recommendedAction, second.recommendedAction);
+          assert.equal(first.reasoning, second.reasoning);
+          assert.ok(allowed.has(first.activityRecommendation), `${activity}/${ageGroup}/${sensitivity}/AQI ${aqi}`);
+          assert.match(first.limitations, /not.*medical advice/i);
+        }
+      }
+    }
+  }
+});

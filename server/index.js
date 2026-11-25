@@ -6,6 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { getAQIStatus, buildRecommendationContext, buildExposureDecision } from "./logic.js";
 import { askGemini } from "./gemini.js";
+import { providerTimeToIso, selectCurrentAndFutureHours } from "./time.js";
 
 dotenv.config();
 
@@ -74,18 +75,25 @@ async function cachedFetch(url, ttlMs = 10 * 60 * 1000) {
 function buildAirUrls(latitude, longitude) {
   const aqParams = new URLSearchParams({
     latitude: String(latitude), longitude: String(longitude), timezone: "auto",
+    timeformat: "unixtime",
     current: "pm10,pm2_5,carbon_monoxide,nitrogen_dioxide,sulphur_dioxide,ozone,us_aqi,european_aqi",
     hourly: "pm10,pm2_5,us_aqi,european_aqi",
     forecast_days: "2",
   });
   const wxParams = new URLSearchParams({
     latitude: String(latitude), longitude: String(longitude), timezone: "auto",
+    timeformat: "unixtime",
     current: "temperature_2m,relative_humidity_2m,apparent_temperature,wind_speed_10m,weather_code",
   });
   return {
     airUrl: `https://air-quality-api.open-meteo.com/v1/air-quality?${aqParams}`,
     weatherUrl: `https://api.open-meteo.com/v1/forecast?${wxParams}`,
   };
+}
+
+function finiteNonNegative(value) {
+  const number = Number(value);
+  return value !== null && value !== undefined && Number.isFinite(number) && number >= 0 ? number : null;
 }
 
 async function fetchTrustedEnvironmentalData(latitude, longitude) {
@@ -98,24 +106,26 @@ async function fetchTrustedEnvironmentalData(latitude, longitude) {
     throw new Error("Invalid provider response shape");
   }
   const current = air.current || {};
-  const aqi = current.us_aqi == null ? NaN : Number(current.us_aqi);
+  const rawAqi = current.us_aqi == null ? NaN : Number(current.us_aqi);
+  const aqi = Number.isFinite(rawAqi) && rawAqi >= 0 ? rawAqi : null;
   const status = getAQIStatus(aqi);
-  const hours = (air.hourly?.time || []).slice(0, 12).map((time, i) => ({
-    time,
-    aqi: air.hourly?.us_aqi?.[i] ?? null,
-    pm25: air.hourly?.pm2_5?.[i] ?? null,
-    pm10: air.hourly?.pm10?.[i] ?? null,
-  }));
+  const observedAt = providerTimeToIso(current.time, air.utc_offset_seconds);
+  const hours = selectCurrentAndFutureHours(
+    air.hourly,
+    current.time,
+    air.utc_offset_seconds,
+    12,
+  );
   return {
     location: { latitude, longitude, timezone: air.timezone || "local" },
-    observedAt: current.time || new Date().toISOString(),
-    aqi: Number.isFinite(aqi) ? aqi : null,
+    observedAt,
+    aqi,
     aqiScale: "US AQI",
     status,
     pollutants: {
-      pm25: current.pm2_5 ?? null, pm10: current.pm10 ?? null,
-      ozone: current.ozone ?? null, nitrogenDioxide: current.nitrogen_dioxide ?? null,
-      carbonMonoxide: current.carbon_monoxide ?? null, sulphurDioxide: current.sulphur_dioxide ?? null,
+      pm25: finiteNonNegative(current.pm2_5), pm10: finiteNonNegative(current.pm10),
+      ozone: finiteNonNegative(current.ozone), nitrogenDioxide: finiteNonNegative(current.nitrogen_dioxide),
+      carbonMonoxide: finiteNonNegative(current.carbon_monoxide), sulphurDioxide: finiteNonNegative(current.sulphur_dioxide),
     },
     weather: weather.current || {},
     hourly: hours,
@@ -298,8 +308,8 @@ app.post("/api/assistant", assistantRateLimiter, async (req, res) => {
     });
   }
 
-  const context = buildRecommendationContext(trusted, profile, question);
   const decision = buildExposureDecision(trusted, profile);
+  const context = buildRecommendationContext(trusted, profile, question, decision);
   const result = await askGemini(question, context, trusted, decision);
   return res.json({
     answer: result.answer,

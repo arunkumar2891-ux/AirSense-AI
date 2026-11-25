@@ -11,8 +11,9 @@ export type AirData = {
     sulphurDioxide: number | null;
   };
   weather: Record<string, number | string>;
+  location: { latitude: number; longitude: number; timezone: string };
   hourly: { time: string; aqi: number | null; pm25: number | null; pm10: number | null }[];
-  observedAt: string;
+  observedAt: string | null;
   source: string;
   attribution: string;
 };

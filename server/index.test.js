@@ -38,17 +38,19 @@ globalThis.fetch = async (url, options) => {
     };
   }
   if (u.includes("air-quality-api.open-meteo.com")) {
+    const observed = Math.floor(Date.parse("2026-11-25T15:00:00Z") / 1000);
     return {
       ok: true,
       json: async () => ({
         current: {
-          time: "2026-11-25T15:00",
+          time: observed,
           us_aqi: 172, // authoritative server-side value
           pm2_5: 55.4, pm10: 88.1, ozone: 40.2,
           nitrogen_dioxide: 21.0, carbon_monoxide: 300.0, sulphur_dioxide: 5.1,
         },
-        hourly: { time: ["2026-11-25T15:00"], us_aqi: [172], pm2_5: [55.4], pm10: [88.1] },
+        hourly: { time: [observed, observed + 3600], us_aqi: [172, 170], pm2_5: [55.4, 54], pm10: [88.1, 86] },
         timezone: "Asia/Kolkata",
+        utc_offset_seconds: 19800,
       }),
     };
   }

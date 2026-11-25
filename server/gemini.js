@@ -33,15 +33,17 @@ const RESPONSE_SCHEMA = {
   properties: {
     summary: { type: "STRING", description: "One-sentence plain-language summary of current air quality." },
     airQualityAssessment: { type: "STRING", description: "Assessment of the observed AQI and pollutant readings." },
-    recommendedAction: { type: "STRING", description: "Primary practical action for the user's profile and question." },
+    recommendation: {
+      type: "STRING",
+      enum: ["suitable", "caution", "avoid", "insufficient_data"],
+      description: "Must exactly match the authoritative deterministic exposure recommendation.",
+    },
     reasoning: { type: "STRING", description: "Brief reasoning grounded only in the supplied facts." },
-    activityAdvice: { type: "STRING", description: "Advice specific to the user's planned activity." },
-    precautions: { type: "STRING", description: "Comma-separated or short precautions for sensitive groups." },
     confidence: { type: "STRING", description: "high | medium | low, with a one-clause rationale." },
     dataLimitations: { type: "STRING", description: "Caveats: modelled data, spatial resolution, not a station reading." },
   },
-  required: ["summary", "airQualityAssessment", "recommendedAction", "reasoning", "activityAdvice", "precautions", "confidence", "dataLimitations"],
-  propertyOrdering: ["summary", "airQualityAssessment", "recommendedAction", "reasoning", "activityAdvice", "precautions", "confidence", "dataLimitations"],
+  required: ["summary", "airQualityAssessment", "recommendation", "reasoning", "confidence", "dataLimitations"],
+  propertyOrdering: ["summary", "airQualityAssessment", "recommendation", "reasoning", "confidence", "dataLimitations"],
 };
 
 // ---------- Safety system prompt ----------
@@ -67,8 +69,7 @@ function buildSystemPrompt(context, decision) {
       `  activityRecommendation: ${decision.activityRecommendation}`,
       `  recommendedAction: ${decision.recommendedAction}`,
       `  reasoning: ${decision.reasoning}`,
-      "Your explanation MUST agree with the activityRecommendation and overallRisk above.",
-      "If you find yourself disagreeing, restate the deterministic recommendation instead.",
+      "Set recommendation to activityRecommendation exactly. You may explain supplied facts, but must not offer separate or weaker advice.",
     );
   }
   lines.push(
@@ -110,59 +111,25 @@ function parseStructuredResponse(text) {
   } catch {
     throw new Error("Model returned non-JSON output");
   }
-  const required = ["summary", "airQualityAssessment", "recommendedAction", "reasoning", "activityAdvice", "precautions", "confidence", "dataLimitations"];
+  const required = ["summary", "airQualityAssessment", "recommendation", "reasoning", "confidence", "dataLimitations"];
   for (const key of required) {
     if (typeof parsed[key] !== "string" || !parsed[key].trim()) {
       throw new Error(`Model response missing or invalid field: ${key}`);
     }
   }
+  const recommendations = new Set(["suitable", "caution", "avoid", "insufficient_data"]);
+  if (!recommendations.has(parsed.recommendation)) {
+    throw new Error("Model response has invalid recommendation");
+  }
   return parsed;
 }
 
-function formatStructuredAnswer(parsed) {
+function formatStructuredAnswer(parsed, deterministicAnswer) {
   return [
-    parsed.summary,
-    parsed.airQualityAssessment,
-    `Recommended: ${parsed.recommendedAction}`,
-    parsed.activityAdvice,
-    parsed.precautions ? `Precautions: ${parsed.precautions}` : "",
+    deterministicAnswer,
+    `AI explanation: ${parsed.summary} ${parsed.airQualityAssessment} ${parsed.reasoning}`,
     `Confidence: ${parsed.confidence}. ${parsed.dataLimitations}`,
   ].filter(Boolean).join("\n\n");
-}
-
-// ---------- Contradiction detection ----------
-const RECOMMENDATION_KEYWORDS = {
-  avoid: ["avoid", "do not", "stay indoors", "not recommended", "discourage", "skip", "postpone", "cancel", "indoor"],
-  caution: ["caution", "reduce", "limit", "shorten", "lower intensity", "moderate", "careful", "consider indoor"],
-  suitable: ["suitable", "safe", "favorable", "ok to", "good to", "enjoy", "proceed"],
-};
-
-function contradictsDecision(structured, decision) {
-  if (!structured || !decision) return false;
-  const detRec = decision.activityRecommendation;
-  if (detRec === "insufficient_data") return false; // no contradiction possible
-
-  // Combine the fields where a recommendation would appear
-  const text = [structured.recommendedAction, structured.activityAdvice, structured.summary].join(" ").toLowerCase();
-
-  const detKeywords = RECOMMENDATION_KEYWORDS[detRec] || [];
-  // Check if the AI text clearly signals a DIFFERENT recommendation category
-  for (const [category, keywords] of Object.entries(RECOMMENDATION_KEYWORDS)) {
-    if (category === detRec) continue; // same category is fine
-    // "suitable" text contradicting "avoid"/"caution" is the dangerous direction
-    if (category === "suitable" && (detRec === "avoid" || detRec === "caution")) {
-      if (keywords.some((k) => text.includes(k)) && !detKeywords.some((k) => text.includes(k))) {
-        return true; // AI says "safe" but rules say avoid/caution and no rule keywords present
-      }
-    }
-    // "avoid" text contradicting "suitable" is less dangerous but still a mismatch
-    if (category === "avoid" && detRec === "suitable") {
-      if (keywords.some((k) => text.includes(k)) && !RECOMMENDATION_KEYWORDS.suitable.some((k) => text.includes(k))) {
-        return true;
-      }
-    }
-  }
-  return false;
 }
 
 // ---------- Retry with exponential backoff + jitter ----------
@@ -224,18 +191,20 @@ export async function askGemini(question, context, trusted, decision = null) {
       const latencyMs = Date.now() - start;
       const text = response?.text;
       const structured = parseStructuredResponse(text);
-      // Check for contradiction with deterministic decision
-      if (decision && contradictsDecision(structured, decision)) {
-        logAI({ model: AI_CONFIG.model, latencyMs, success: true, mode: "ai-overridden", attempt });
+      // The enum is the safety contract. Any mismatch discards the entire AI
+      // response; free-form model text is never used to weaken the rules.
+      if (decision && structured.recommendation !== decision.activityRecommendation) {
+        logAI({ model: AI_CONFIG.model, latencyMs, success: false, mode: "rules-safety-fallback", attempt, errorType: "RecommendationMismatch" });
         return {
-          answer: formatStructuredAnswer(structured) + "\n\nNote: This explanation was adjusted to align with the safety rules engine.",
-          mode: "ai",
+          answer: context.answer,
+          mode: "rules-fallback",
           structured: null,
           decision,
+          note: "AI explanation discarded because it did not match the deterministic exposure recommendation.",
         };
       }
       logAI({ model: AI_CONFIG.model, latencyMs, success: true, mode: "ai", attempt });
-      return { answer: formatStructuredAnswer(structured), mode: "ai", structured, decision };
+      return { answer: formatStructuredAnswer(structured, context.answer), mode: "ai", structured, decision };
     } catch (err) {
       const latencyMs = Date.now() - start;
       lastError = err;

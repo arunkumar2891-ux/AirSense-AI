@@ -39,15 +39,15 @@ The dashboard is location-first:
 ## How it works
 1. The browser resolves a location: GPS geolocation (after an explained permission request), a searched city, or the demo fallback.
 2. The backend fetches air-quality and weather data from Open-Meteo and caches responses for 10 minutes.
-3. The UI displays the reported AQI, pollutant levels and available hourly forecast.
+3. The UI displays the reported AQI, pollutant levels and the next available hourly forecast from the current local hour onward.
 4. The assistant combines the supplied readings with the user's activity and sensitivity profile.
 5. If configured, an LLM explains the supplied facts. If the provider is unavailable or not configured, the deterministic guidance engine responds.
 
 ## Assumptions and limitations
 - Open-Meteo air-quality values are model-based estimates, not guaranteed readings from a nearby regulatory station. Spatial resolution and forecast uncertainty apply.
 - The MVP displays US AQI only. If the provider does not return a US AQI value, the app shows data as unavailable rather than substituting European AQI, because these scales are not interchangeable.
-- The MVP uses city presets plus browser geolocation; it does not claim to identify the cleanest street or route.
-- AQI bands follow the US EPA AQI category ranges when the US AQI field is available. If European AQI is returned, its category labels are approximate display guidance and should not be treated as a regulatory conversion.
+- The MVP uses global city search plus browser geolocation; it does not claim to identify the cleanest street or route.
+- AQI bands follow the US EPA AQI category ranges when the US AQI field is available. European AQI is never substituted or converted because the scales are not interchangeable.
 - Guidance is informational and not medical advice. Follow local public-health authorities.
 - Alerts, saved profiles, multi-stop route exposure and long-term personal exposure tracking are future enhancements.
 
@@ -62,12 +62,14 @@ AirSense uses a deterministic exposure intelligence engine (`server/logic.js`) b
 | Activity intensity | Vigorous (running, cycling, outdoor workout, sports) adds risk; prolonged (commuting) adds less |
 | Vulnerability | Children, older adults, and respiratory/heart-lung sensitivity each add risk |
 | Wind speed | Low wind (<5 km/h) adds stagnation risk |
-| Forecast trend | Rising AQI forecast adds risk; falling trend is noted but does not lower current risk |
-| Data freshness | Stale (>3h) or missing readings return `insufficient_data` instead of a decision |
+| Forecast trend | Future-only model forecast is reported as context; it never changes the current exposure recommendation |
+| Data freshness | Stale (>3h), missing, invalid, or future-dated observations return `insufficient_data` |
 
 The engine produces a structured decision: `overallRisk`, `activityRecommendation`, `recommendedAction`, `reasoning`, `sensitiveGroupAdvice`, `alternativeActivity`, `dataFreshness`, and `limitations`.
 
-When Gemini is configured, it receives this decision as an authoritative baseline and is instructed to explain it without contradicting it. A contradiction-detection layer checks the AI response against the deterministic recommendation; if the AI disagrees (e.g., says "safe" when the rules say "avoid"), the deterministic result is used and the discrepancy is logged.
+Open-Meteo is requested with Unix timestamps so observations and forecasts remain unambiguous across locations and daylight-saving changes. The next-12-hours series starts at the current local-hour bucket; completed past hours are excluded. A missing provider timestamp is never replaced with the server clock.
+
+When Gemini is configured, it receives this decision as an authoritative baseline. Its structured response must include a strict `recommendation` enum (`suitable`, `caution`, `avoid`, or `insufficient_data`) that exactly matches the deterministic engine. A mismatch, malformed response, or invalid enum discards the entire AI response and returns the deterministic answer. Gemini may explain supplied facts but cannot weaken or replace the exposure recommendation. The same deterministic recommendation is used when no API key is configured.
 
 ### Decision limitations
 
