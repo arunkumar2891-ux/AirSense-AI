@@ -46,7 +46,7 @@ function App() {
   async function submit(q = question) {
     if (!q.trim() || !air) return;
     setThinking(true); setAnswer("");
-    try { const result = await askAssistant(q, profile, air); setAnswer(result.answer); setMode(result.mode); }
+    try { const result = await askAssistant(q, profile, coords); setAnswer(result.answer); setMode(result.mode); }
     catch (e) { setAnswer(e instanceof Error ? e.message : "Assistant unavailable."); }
     finally { setThinking(false); setQuestion(""); }
   }
