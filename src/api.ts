@@ -1,4 +1,4 @@
-import type { AirData, AssistantResponse, LocationResult, Profile } from "./types";
+import type { AirData, AssistantResponse, GoWindowRequest, GoWindowResponse, LocationResult, Profile } from "./types";
 
 export async function getAirQuality(lat: number, lon: number, signal?: AbortSignal): Promise<AirData> {
   const response = await fetch(`/api/air-quality?lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}`, { signal });
@@ -17,6 +17,19 @@ export async function askAssistant(question: string, profile: Profile, coords: {
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || "Assistant request failed.");
   return data as AssistantResponse;
+}
+
+export async function findGoWindow(request: GoWindowRequest, signal?: AbortSignal): Promise<GoWindowResponse> {
+  const response = await fetch("/api/gowindow", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    signal,
+    // The server retrieves the schedule itself. Never send readings or decisions.
+    body: JSON.stringify(request),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || "Activity window request failed.");
+  return data as GoWindowResponse;
 }
 
 export async function searchLocations(query: string, signal?: AbortSignal): Promise<LocationResult[]> {

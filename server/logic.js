@@ -34,9 +34,17 @@ function isChildActivity(activity) { return CHILD_ACTIVITIES.has(activity.toLowe
 const FRESH_MS = 30 * 60 * 1000; // 30 minutes
 const STALE_MS = 3 * 60 * 60 * 1000; // 3 hours
 
-export function getDataFreshness(observedAt) {
+function resolveEvaluationTime(now) {
+  if (now === undefined) return Date.now();
+  const value = now instanceof Date ? now.getTime() : Number(now);
+  return Number.isFinite(value) ? value : null;
+}
+
+export function getDataFreshness(observedAt, now) {
   if (!observedAt) return { state: "unknown", ageMs: null, label: "Observation time unknown." };
-  const age = Date.now() - new Date(observedAt).getTime();
+  const evaluatedAt = resolveEvaluationTime(now);
+  if (evaluatedAt === null) return { state: "unknown", ageMs: null, label: "Observation time invalid." };
+  const age = evaluatedAt - new Date(observedAt).getTime();
   if (!Number.isFinite(age) || age < 0) return { state: "unknown", ageMs: null, label: "Observation time invalid." };
   if (age <= FRESH_MS) return { state: "fresh", ageMs: age, label: `Observed ${Math.round(age / 60000)} min ago.` };
   if (age <= STALE_MS) return { state: "aging", ageMs: age, label: `Observed ${Math.round(age / 60000)} min ago — may not reflect current conditions.` };
@@ -44,7 +52,7 @@ export function getDataFreshness(observedAt) {
 }
 
 // ---------- Exposure decision engine ----------
-export function buildExposureDecision(air = {}, profile = {}) {
+export function buildExposureDecision(air = {}, profile = {}, now) {
   const aqi = air.aqi !== null && air.aqi !== undefined && air.aqi !== "" ? Number(air.aqi) : null;
   const aqiValid = aqi !== null && Number.isFinite(aqi) && aqi >= 0;
   const aqiStatus = getAQIStatus(aqi);
@@ -55,7 +63,7 @@ export function buildExposureDecision(air = {}, profile = {}) {
   const sensitivity = String(profile.sensitivity || "general");
   const isSensitive = sensitivity !== "general" || ageGroup === "child" || ageGroup === "older adult";
   const isChild = ageGroup === "child" || isChildActivity(activity);
-  const freshness = getDataFreshness(air.observedAt);
+  const freshness = getDataFreshness(air.observedAt, now);
   const hourly = Array.isArray(air.hourly) && air.hourly.length > 0 ? air.hourly : null;
   const hasForecast = hourly !== null && hourly.some((h) => h.aqi !== null);
 

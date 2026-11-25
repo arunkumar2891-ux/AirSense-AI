@@ -6,7 +6,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { getAQIStatus, buildRecommendationContext, buildExposureDecision } from "./logic.js";
 import { askGemini } from "./gemini.js";
-import { providerTimeToIso, selectCurrentAndFutureHours } from "./time.js";
+import { providerTimeToEpochMs, providerTimeToIso, selectCurrentAndFutureHours } from "./time.js";
+import { findGoWindows, TIME_PREFERENCES } from "./gowindow.js";
 import { BoundedTTLCache, normalizeCoordinates } from "./cache.js";
 import { createRateLimiter } from "./rate-limit.js";
 
@@ -105,6 +106,17 @@ function buildAirUrls(latitude, longitude) {
   };
 }
 
+function buildForecastWeatherUrl(latitude, longitude) {
+  const params = new URLSearchParams({
+    latitude: String(latitude), longitude: String(longitude), timezone: "auto",
+    timeformat: "unixtime",
+    current: "temperature_2m,relative_humidity_2m,apparent_temperature,wind_speed_10m,weather_code",
+    hourly: "temperature_2m,relative_humidity_2m,wind_speed_10m",
+    forecast_days: "2",
+  });
+  return `https://api.open-meteo.com/v1/forecast?${params}`;
+}
+
 function finiteNonNegative(value) {
   const number = Number(value);
   return value !== null && value !== undefined && Number.isFinite(number) && number >= 0 ? number : null;
@@ -149,12 +161,73 @@ async function fetchTrustedEnvironmentalData(latitude, longitude) {
   };
 }
 
+function finiteWeatherNumber(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function hourlyWeatherByTime(weather, utcOffsetSeconds) {
+  const hourly = weather?.hourly;
+  if (!hourly || !Array.isArray(hourly.time)) return new Map();
+  const byTime = new Map();
+  hourly.time.forEach((time, index) => {
+    const epochMs = providerTimeToEpochMs(time, utcOffsetSeconds);
+    if (epochMs === null) return;
+    const temperature = finiteWeatherNumber(hourly.temperature_2m?.[index]);
+    const humidity = finiteWeatherNumber(hourly.relative_humidity_2m?.[index]);
+    const wind = finiteNonNegative(hourly.wind_speed_10m?.[index]);
+    const conditions = {};
+    if (temperature !== null) conditions.temperature_2m = temperature;
+    if (humidity !== null && humidity >= 0 && humidity <= 100) conditions.relative_humidity_2m = humidity;
+    if (wind !== null) conditions.wind_speed_10m = wind;
+    if (Object.keys(conditions).length) byTime.set(new Date(epochMs).toISOString(), conditions);
+  });
+  return byTime;
+}
+
+function toGoWindowForecast(air, weather) {
+  const current = air?.current || {};
+  const issuedAt = providerTimeToIso(current.time, air?.utc_offset_seconds);
+  const hours = selectCurrentAndFutureHours(air?.hourly, current.time, air?.utc_offset_seconds, 12);
+  const weatherOffset = weather?.utc_offset_seconds ?? air?.utc_offset_seconds;
+  const weatherByTime = hourlyWeatherByTime(weather, weatherOffset);
+  return {
+    timezone: typeof air?.timezone === "string" ? air.timezone : null,
+    issuedAt,
+    hourly: hours.map((hour) => {
+      const conditions = weatherByTime.get(hour.time);
+      return conditions ? { ...hour, weather: conditions } : hour;
+    }),
+  };
+}
+
+async function fetchTrustedForecast(latitude, longitude) {
+  const normalized = normalizeCoordinates(latitude, longitude);
+  const { airUrl } = buildAirUrls(normalized.latitude, normalized.longitude);
+  const weatherUrl = buildForecastWeatherUrl(normalized.latitude, normalized.longitude);
+  const [air, weather] = await Promise.all([
+    cachedFetch(airUrl),
+    cachedFetch(weatherUrl),
+  ]);
+  if (!air || typeof air !== "object" || !weather || typeof weather !== "object") {
+    throw new Error("Invalid provider response shape");
+  }
+  return toGoWindowForecast(air, weather);
+}
+
 // ---------- Input validation ----------
 const ALLOWED_ACTIVITIES = new Set(["running", "cycling", "outdoor workout", "sports", "commuting", "daily activities", "children's outdoor play"]);
 const ALLOWED_AGE_GROUPS = new Set(["adult", "child", "older adult"]);
 const ALLOWED_SENSITIVITIES = new Set(["general", "respiratory sensitivity", "heart or lung condition"]);
 
+function isGeographicInput(value) {
+  if (typeof value === "number") return Number.isFinite(value);
+  return typeof value === "string" && /^-?\d+(?:\.\d+)?$/.test(value.trim());
+}
+
 function validateCoordinates(lat, lon) {
+  if (!isGeographicInput(lat) || !isGeographicInput(lon)) return null;
   const latitude = Number(lat);
   const longitude = Number(lon);
   if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null;
@@ -201,6 +274,50 @@ function validateAssistantInput(body) {
   };
 }
 
+function validateGoWindowInput(body) {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return { error: "Request body must be a JSON object." };
+  }
+  const coords = validateCoordinates(body.latitude, body.longitude);
+  if (!coords) return { error: "Valid latitude and longitude are required." };
+  if (typeof body.activity !== "string" || !ALLOWED_ACTIVITIES.has(body.activity)) {
+    return { error: `Invalid activity. Allowed: ${[...ALLOWED_ACTIVITIES].join(", ")}.` };
+  }
+  if (!body.profile || typeof body.profile !== "object" || Array.isArray(body.profile)) {
+    return { error: "Profile must be an object." };
+  }
+  const ageGroup = body.profile.ageGroup ?? "adult";
+  const sensitivity = body.profile.sensitivity ?? "general";
+  if (typeof ageGroup !== "string" || !ALLOWED_AGE_GROUPS.has(ageGroup)) {
+    return { error: `Invalid age group. Allowed: ${[...ALLOWED_AGE_GROUPS].join(", ")}.` };
+  }
+  if (typeof sensitivity !== "string" || !ALLOWED_SENSITIVITIES.has(sensitivity)) {
+    return { error: `Invalid sensitivity. Allowed: ${[...ALLOWED_SENSITIVITIES].join(", ")}.` };
+  }
+  if (body.profile.activity !== undefined && body.profile.activity !== body.activity) {
+    return { error: "Activity does not match the profile activity." };
+  }
+  if (!Number.isInteger(body.durationMinutes) || body.durationMinutes < 15 || body.durationMinutes > 180) {
+    return { error: "Duration must be a whole number of minutes from 15 to 180." };
+  }
+  let timePreference = null;
+  if (body.timePreference !== undefined && body.timePreference !== null) {
+    if (typeof body.timePreference !== "string" || !Object.hasOwn(TIME_PREFERENCES, body.timePreference)) {
+      return { error: `Invalid time preference. Allowed: ${Object.keys(TIME_PREFERENCES).join(", ")}.` };
+    }
+    timePreference = body.timePreference;
+  }
+  return {
+    value: {
+      latitude: coords.latitude,
+      longitude: coords.longitude,
+      durationMinutes: body.durationMinutes,
+      timePreference,
+      profile: { activity: body.activity, ageGroup, sensitivity },
+    },
+  };
+}
+
 // ---------- Rate limiting (bounded, in-memory, per trusted client IP) ----------
 const RATE_LIMIT_WINDOW_MS = Math.max(1000, Number(process.env.ASSISTANT_RATE_LIMIT_WINDOW_MS) || 60000);
 const RATE_LIMIT_MAX = Math.max(1, Number(process.env.ASSISTANT_RATE_LIMIT_MAX) || 20);
@@ -224,6 +341,11 @@ const rateLimiters = {
     name: "assistant",
     windowMs: RATE_LIMIT_WINDOW_MS,
     max: RATE_LIMIT_MAX,
+  }),
+  goWindow: createRateLimiter({
+    name: "activity-window",
+    windowMs: process.env.DATA_RATE_LIMIT_WINDOW_MS || 60000,
+    max: process.env.DATA_RATE_LIMIT_MAX || 60,
   }),
 };
 const rateBuckets = rateLimiters.assistant.buckets;
@@ -277,6 +399,19 @@ app.get("/api/air-quality", rateLimiters.airQuality.middleware, async (req, res)
   } catch (error) {
     const code = isTimeoutError(error) ? 504 : 502;
     res.status(code).json({ error: "Current environmental data is temporarily unavailable." });
+  }
+});
+
+app.post("/api/gowindow", rateLimiters.goWindow.middleware, async (req, res) => {
+  const parsed = validateGoWindowInput(req.body);
+  if (parsed.error) return res.status(400).json({ error: parsed.error });
+  const { latitude, longitude, profile, durationMinutes, timePreference } = parsed.value;
+  try {
+    const forecast = await fetchTrustedForecast(latitude, longitude);
+    return res.json(findGoWindows({ forecast, profile, durationMinutes, timePreference }));
+  } catch (error) {
+    const code = isTimeoutError(error) ? 504 : 502;
+    return res.status(code).json({ error: "Forecast data is temporarily unavailable." });
   }
 });
 
@@ -336,7 +471,9 @@ app.use((err, req, res, _next) => {
 export {
   app,
   validateAssistantInput,
+  validateGoWindowInput,
   fetchTrustedEnvironmentalData,
+  fetchTrustedForecast,
   cachedFetch,
   cache,
   CACHE_MAX_ENTRIES,

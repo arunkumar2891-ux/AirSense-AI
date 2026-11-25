@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Activity, ArrowUpRight, Bot, Cloud, Compass, Crosshair, HeartPulse, Leaf, MapPin, MessageCircle, RefreshCw, Search, Send, ShieldCheck, Wind, X } from "lucide-react";
+import { Activity, ArrowUpRight, Bot, Clock, Cloud, Compass, Crosshair, Leaf, MapPin, MessageCircle, RefreshCw, Search, Send, ShieldCheck, Wind, X } from "lucide-react";
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
-import { askAssistant, getAirQuality, reverseGeocode, searchLocations } from "./api";
-import type { AirData, ExposureDecision, LocationResult, Profile } from "./types";
+import { askAssistant, findGoWindow, getAirQuality, reverseGeocode, searchLocations } from "./api";
+import type { AirData, ExposureDecision, GoWindowResponse, GoWindowTimePreference, LocationResult, Profile } from "./types";
 import { getAqiPresentation, getFreshnessPresentation, isLatestRequest, shouldApplyGpsResult, US_AQI_CATEGORIES } from "./reliability";
+import { buildGoWindowRequest, DEFAULT_GO_WINDOW_DURATION, DEFAULT_TIME_PREFERENCE, goWindowRequestKey } from "./gowindow";
+import GoWindowPanel from "./GoWindowPanel";
 import ThemeSelector from "./ThemeSelector";
 
 const fallbackCity = { name: "Chennai, Tamil Nadu, India", lat: 13.0827, lon: 80.2707 };
@@ -74,6 +76,12 @@ function App() {
   const [mode, setMode] = useState("");
   const [decision, setDecision] = useState<ExposureDecision | null>(null);
   const [assistantError, setAssistantError] = useState("");
+  const [duration, setDuration] = useState(DEFAULT_GO_WINDOW_DURATION);
+  const [timePreference, setTimePreference] = useState<GoWindowTimePreference>(DEFAULT_TIME_PREFERENCE);
+  const [schedule, setSchedule] = useState<GoWindowResponse | null>(null);
+  const [scheduleKey, setScheduleKey] = useState("");
+  const [scheduleLoading, setScheduleLoading] = useState(false);
+  const [scheduleError, setScheduleError] = useState("");
 
   // Location UX state
   const [showGeoBanner, setShowGeoBanner] = useState(false);
@@ -94,6 +102,9 @@ function App() {
   const assistantRequestRef = useRef(0);
   const assistantAbortRef = useRef<AbortController | null>(null);
   const assistantResultRef = useRef<HTMLDivElement | null>(null);
+  const goWindowRequestRef = useRef(0);
+  const goWindowAbortRef = useRef<AbortController | null>(null);
+  const goWindowPendingRef = useRef(false);
 
   async function refresh(lat = loc.lat, lon = loc.lon) {
     const requestId = ++airRequestRef.current;
@@ -210,7 +221,19 @@ function App() {
     airAbortRef.current?.abort();
     searchAbortRef.current?.abort();
     assistantAbortRef.current?.abort();
+    goWindowAbortRef.current?.abort();
   }, []);
+
+  const scheduleRequestKey = goWindowRequestKey(loc, profile, duration, timePreference);
+  useEffect(() => {
+    goWindowAbortRef.current?.abort();
+    goWindowRequestRef.current += 1;
+    goWindowPendingRef.current = false;
+    setSchedule(null);
+    setScheduleKey("");
+    setScheduleError("");
+    setScheduleLoading(false);
+  }, [scheduleRequestKey]);
 
   useEffect(() => {
     if (!thinking && (answer || assistantError)) assistantResultRef.current?.focus();
@@ -304,6 +327,35 @@ function App() {
       }
     }
   }
+  async function findBestTime() {
+    if (scheduleLoading || goWindowPendingRef.current) return;
+    goWindowPendingRef.current = true;
+    const requestId = ++goWindowRequestRef.current;
+    const request = buildGoWindowRequest(loc, profile, duration, timePreference);
+    const requestKey = JSON.stringify(request);
+    goWindowAbortRef.current?.abort();
+    const controller = new AbortController();
+    goWindowAbortRef.current = controller;
+    setScheduleLoading(true);
+    setSchedule(null);
+    setScheduleKey("");
+    setScheduleError("");
+    try {
+      const result = await findGoWindow(request, controller.signal);
+      if (!isLatestRequest(requestId, goWindowRequestRef.current)) return;
+      setSchedule(result);
+      setScheduleKey(requestKey);
+    } catch (e) {
+      if (controller.signal.aborted || !isLatestRequest(requestId, goWindowRequestRef.current)) return;
+      setScheduleError(e instanceof Error ? e.message : "Activity window request failed.");
+    } finally {
+      if (isLatestRequest(requestId, goWindowRequestRef.current)) {
+        goWindowPendingRef.current = false;
+        setScheduleLoading(false);
+      }
+    }
+  }
+
   const aqi = air?.aqi;
   const aqiPresentation = getAqiPresentation(aqi);
   const freshness = aqiPresentation.value === null
@@ -322,6 +374,7 @@ function App() {
       <div className="brand"><div className="brand-icon"><Wind size={22}/></div><div><strong>AirSense<span> AI</span></strong><small>URBAN AIR INTELLIGENCE</small></div></div>
       <nav className="primary-nav" aria-label="Dashboard sections">
         <a className="nav" href="#overview"><Activity size={17}/> Overview</a>
+        <a className="nav" href="#gowindow"><Clock size={17}/> GoWindow</a>
         <a className="nav" href="#pollutants"><Compass size={17}/> Pollutants</a>
         <a className="nav" href="#assistant"><MessageCircle size={17}/> AI Assistant</a>
       </nav>
@@ -400,6 +453,21 @@ function App() {
           <div className="chart-legend"><span><i/> US AQI forecast</span><span className="muted">Model estimate · not a sensor reading</span></div>
         </div>
       </section>
+      <GoWindowPanel
+        locationLabel={loc.source === "default" ? "Default · Chennai" : loc.label}
+        profile={profile}
+        onProfileChange={setProfile}
+        duration={duration}
+        onDurationChange={setDuration}
+        timePreference={timePreference}
+        onTimePreferenceChange={setTimePreference}
+        loading={scheduleLoading && scheduleKey === ""}
+        error={scheduleError}
+        result={scheduleKey === scheduleRequestKey ? schedule : null}
+        hourly={air?.hourly ?? []}
+        timezone={air?.location.timezone ?? null}
+        onFind={findBestTime}
+      />
       <section className="section-block" id="pollutants"><div className="section-header"><div><span className="section-kicker">WHAT'S IN THE AIR</span><h2>Pollutant breakdown</h2></div><span className="muted">Modelled concentration · µg/m³ where applicable</span></div>
         <div className="pollutant-grid">
           <Pollutant name="PM2.5" value={air?.pollutants.pm25} unit="µg/m³" icon={<Cloud/>} desc="Fine particles"/>
@@ -410,7 +478,8 @@ function App() {
       </section>
       <section className="section-block assistant-section" id="assistant"><div className="section-header"><div><span className="section-kicker">YOUR PERSONAL AIR GUIDE</span><h2>Ask AirSense AI</h2><p className="muted">Grounded in local model estimates and your activity context.</p></div><div className="ai-mark"><Bot size={20}/> AI ASSISTED</div></div>
         <div className="assistant-card">
-          <div className="profile-row"><div className="profile-heading"><HeartPulse size={17}/><b>Personalize your guidance</b></div><div className="profile-controls"><label>Activity<select value={profile.activity} onChange={e => setProfile({...profile, activity:e.target.value})}><option value="running">Running</option><option value="cycling">Cycling</option><option value="outdoor workout">Outdoor workout</option><option value="sports">Sports</option><option value="commuting">Commuting</option><option value="daily activities">Daily activities</option><option value="children's outdoor play">Children's outdoor play</option></select></label><label>Profile<select value={profile.ageGroup} onChange={e => setProfile({...profile, ageGroup:e.target.value})}><option value="adult">Adult</option><option value="child">Child</option><option value="older adult">Older adult</option></select></label><label>Sensitivity<select value={profile.sensitivity} onChange={e => setProfile({...profile, sensitivity:e.target.value})}><option value="general">General</option><option value="respiratory sensitivity">Respiratory sensitivity</option><option value="heart or lung condition">Heart/lung condition</option></select></label></div></div>
+          <div className="profile-row"><div className="profile-heading"><Bot size={17}/><b>Using the GoWindow activity profile</b></div><a className="profile-link" href="#gowindow">Change activity or profile</a></div>
+          <p className="profile-summary">{profile.activity} · {profile.ageGroup} · {profile.sensitivity}</p>
           <div className="prompt-list">{prompts.map(p => <button key={p} onClick={() => submit(p)} disabled={thinking || !air}>{p}<ArrowUpRight size={13}/></button>)}</div>
           {decision && <div className="decision-card">
             <div className="decision-top">

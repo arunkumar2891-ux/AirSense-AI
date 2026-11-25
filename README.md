@@ -10,10 +10,18 @@ Urban air quality assistant.
 ## Problem
 People often see an AQI number but do not know what it means for their planned activity, household context, or exposure. AirSense AI translates environmental measurements into understandable guidance while clearly communicating uncertainty.
 
+## What makes AirSense different
+- **Decisions are deterministic; the LLM only explains.** Exposure guidance comes from a rule engine with explicit thresholds. Gemini receives the decision as an authoritative baseline and its response is discarded entirely if its recommendation enum does not match it exactly. Scheduling (GoWindow) never calls an LLM at all.
+- **Future plans never rewrite the present.** The current exposure decision uses only the current observation. GoWindow evaluates future hours separately and is labelled as forecast estimates, so a good window later cannot make bad air now look safe.
+- **Missing data is never favorable data.** A missing US AQI reading means "unavailable," not "clean." Incomplete PM2.5, weather, or conflicting duplicate hours are disclosed in limitations and excluded from scheduling rather than assumed safe.
+- **US AQI and European AQI are never mixed.** The scales are not interchangeable; if US AQI is absent the app says so instead of converting.
+- **Time preferences respect your day without weakening safety.** Preferred times filter already-safe windows; they never relax the thresholds that decide what is safe.
+
 ## Features
 - Current modeled air-quality data and weather for selected cities or browser geolocation
 - US AQI, pollutant concentrations and a 12-hour outlook
 - Personalized guidance using activity, age group and sensitivity context
+- GoWindow: deterministic scheduling of 15–180 minute outdoor activities with optional time-of-day preferences and a 12-hour planning timeline
 - Optional Gemini or Groq conversational reasoning, with deterministic fallback
 - Server-side API proxy, short-lived cache, input validation and health endpoint
 - Responsive, accessible dashboard with persisted Light, Dark and System themes
@@ -24,6 +32,7 @@ People often see an AQI number but do not know what it means for their planned a
 - Open-Meteo Air Quality API and Forecast API
 - CAMS-based air-quality model estimates
 - Rule-based decision engine; optional Gemini/Groq adapter
+- `POST /api/gowindow` ranks future activity windows from server-fetched forecasts. It does not accept client-supplied readings and does not call Gemini.
 
 ## Location & privacy
 
@@ -42,6 +51,59 @@ The dashboard is location-first:
 3. The UI displays the reported AQI, pollutant levels and the next available hourly forecast from the current local hour onward.
 4. The assistant combines the supplied readings with the user's activity and sensitivity profile.
 5. If configured, an LLM explains the supplied facts. If the provider is unavailable or not configured, the deterministic guidance engine responds.
+6. `POST /api/gowindow` separately evaluates the trusted hourly forecast for a 15–180 minute activity. The dashboard sends the selected location, activity profile, duration, and an optional time preference. Preferred times use the location timezone. Suitable windows, alternatives outside that preference, no suitable window, and insufficient forecast data stay distinct and do not change the current exposure guidance. The planning timeline draws those returned windows on the next 12 local hours and does not create recommendations of its own.
+
+## GoWindow scheduling
+
+GoWindow finds up to three non-overlapping future windows for one outdoor activity. It is fully deterministic — no LLM is involved in scheduling.
+
+1. The browser sends only the selected coordinates, activity profile, duration (15–180 minutes), and an optional time preference. It never sends readings, and any client-supplied environmental fields are ignored (locked by tests).
+2. The server fetches the trusted Open-Meteo forecast itself, in Unix timestamps so daylight-saving transitions stay unambiguous, and evaluates each of the next 12 hourly instants with the same `server/logic.js` exposure engine that powers current guidance.
+3. Hours classified `suitable` for the profile are chained into contiguous intervals. A window must be fully covered by suitable hours — gaps, unavailable readings, and conflicting duplicate hours break a window rather than being assumed safe.
+4. Candidate windows are ranked by worst-hour US AQI, then known PM2.5 (windows missing PM2.5 rank below windows with known values at equal AQI and disclose it), then low-wind stagnation hours, then earliest start.
+5. If a time preference is set, windows must lie fully inside it, computed in the location's IANA timezone — never the browser or server timezone. Suitable windows outside the preference may be listed as clearly labelled **alternatives**, never as the primary recommendation. If nothing anywhere is suitable, the response is an explicit `no_suitable_window` — nothing is fabricated.
+
+### API
+
+```http
+POST /api/gowindow
+Content-Type: application/json
+
+{
+  "latitude": 13.0827,
+  "longitude": 80.2707,
+  "activity": "running",
+  "profile": { "activity": "running", "ageGroup": "adult", "sensitivity": "general" },
+  "durationMinutes": 45,
+  "timePreference": "daytime"
+}
+```
+
+Input is validated against allowlists before any upstream call: coordinates must be finite and in range; `activity`, `ageGroup`, and `sensitivity` must be known values; `profile.activity` must match `activity`; `durationMinutes` must be an integer from 15 to 180; `timePreference` must be one of `any`, `morning`, `afternoon`, `evening`, `daytime` (omitting it preserves the original any-time behavior). Invalid input returns `400` with no upstream fetch. The endpoint is rate-limited like the other data endpoints and shares the bounded upstream cache.
+
+Responses carry a `status` of `suitable_windows`, `outside_preference` (alternatives only), `no_suitable_window`, or `insufficient_data`, plus per-window AQI/PM2.5/weather ranges, ranking explanations, data-freshness labels, and limitations. `outside_preference` windows are marked `placement: "alternative"`.
+
+### Time preferences
+
+| Preference | Local range (location timezone) |
+|---|---|
+| `any` | No restriction |
+| `morning` | 5 AM–12 PM |
+| `afternoon` | 12 PM–5 PM |
+| `evening` | 5 PM–10 PM |
+| `daytime` | 5 AM–10 PM (dashboard default) |
+
+A window counts as inside a preference only when its start and end both fall inside the range on the same local day. Preferences filter already-suitable windows; they never change exposure thresholds.
+
+### Planning timeline
+
+The dashboard draws the next 12 local hours from the same forecast data: hour labels in the location timezone (midnight and DST handled via absolute instants), per-hour forecast US AQI category and PM2.5, the selected preference range, a current-time marker, and the scheduler's returned windows. Hour cells are informational only — they are never selectable as activities. Only backend-returned windows are selectable, and selecting one shows its start/end, duration, forecast AQI, PM2.5, weather, and ranking explanation. Hours without forecast readings are shown as "No forecast" and are never interpolated. The current exposure card remains a separate decision above.
+
+### Limitations and safety
+
+- Windows are forecast model estimates (CAMS via Open-Meteo), not sensor readings, guarantees, or medical clearance. Official local public-health advisories always take precedence.
+- Missing US AQI data yields `insufficient_data`; missing PM2.5 is disclosed and never treated as clean air; missing weather is disclosed and never assumed.
+- A "suitable" window describes forecast data only. Conditions can change; the freshness label on every window says how old the underlying model run is.
 
 ## Assumptions and limitations
 - Open-Meteo air-quality values are model-based estimates, not guaranteed readings from a nearby regulatory station. Spatial resolution and forecast uncertainty apply.
