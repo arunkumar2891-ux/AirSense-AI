@@ -74,7 +74,10 @@ test("search and assistant controls expose practical keyboard and error semantic
   assert.match(source, /assistantError[\s\S]*role="alert"/);
   assert.match(source, /disabled=\{thinking \|\| !air\}/);
   assert.match(source, /setAssistantError\(""\); setDecision\(null\)/);
-  assert.match(source, /className="mobile-nav"/);
+  assert.match(source, /className="site-header"/);
+  assert.match(source, /className="primary-nav"/);
+  assert.doesNotMatch(source, /className="sidebar"|className="mobile-nav"/);
+  assert.match(source, /name: "Chennai, Tamil Nadu, India", lat: 13\.0827, lon: 80\.2707/);
   assert.doesNotMatch(source, /WEDNESDAY, NOVEMBER 25, 2026/);
   assert.doesNotMatch(source, /LIVE DATA|> LIVE</);
 });

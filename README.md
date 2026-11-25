@@ -29,15 +29,15 @@ People often see an AQI number but do not know what it means for their planned a
 
 The dashboard is location-first:
 
-- On first visit the app explains why location helps, then asks for browser geolocation permission. It never blocks the dashboard while waiting — the demo city loads immediately.
+- On first visit the app explains why location helps, then asks for browser geolocation permission. It never blocks the dashboard while waiting — Chennai loads immediately as the default city.
 - Granted permission loads local air quality and weather and asks BigDataCloud's browser-only reverse-geocoding endpoint directly for a friendly place name (city, region, country). The server never sends coordinates to BigDataCloud.
 - You can search any city worldwide (`/api/geocode`, backed by Open-Meteo's geocoding API). A manually selected location takes precedence over GPS for the rest of the session, and a "Back to my location" action returns to GPS at any time.
-- Permission is never re-requested: once denied or dismissed, the app stays on the fallback city with the search field, marked with a `DEMO CITY` badge so GPS, selected, and demo locations are always clearly distinguished.
+- Permission is never re-requested: once denied or dismissed, the app stays on Chennai with the search field, marked `DEFAULT` so GPS, selected, and default locations are always clearly distinguished.
 - Precise coordinates are never sent to Gemini (locked in by a test) and never persisted beyond session storage. Environmental API coordinates are rounded to two decimal places (about 1 km) before server-side caching. For GPS naming only, the browser shares the current coordinates directly with BigDataCloud under its client-side endpoint terms; failure falls back honestly to “Your location.”
 - Denial, timeout, unavailable position, and geocoding failures all degrade gracefully with a visible notice — the app never fabricates a location or an environmental reading.
 
 ## How it works
-1. The browser resolves a location: GPS geolocation (after an explained permission request), a searched city, or the demo fallback.
+1. The browser resolves a location: GPS geolocation (after an explained permission request), a searched city, or the Chennai default.
 2. The backend fetches air-quality and weather data from Open-Meteo and caches responses for 10 minutes in a bounded 500-entry LRU cache. Concurrent requests for the same rounded location share one upstream request.
 3. The UI displays the reported AQI, pollutant levels and the next available hourly forecast from the current local hour onward.
 4. The assistant combines the supplied readings with the user's activity and sensitivity profile.

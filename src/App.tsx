@@ -6,7 +6,7 @@ import type { AirData, ExposureDecision, LocationResult, Profile } from "./types
 import { getAqiPresentation, getFreshnessPresentation, isLatestRequest, shouldApplyGpsResult, US_AQI_CATEGORIES } from "./reliability";
 import ThemeSelector from "./ThemeSelector";
 
-const fallbackCity = { name: "Hyderabad", lat: 17.385, lon: 78.4867 };
+const fallbackCity = { name: "Chennai, Tamil Nadu, India", lat: 13.0827, lon: 80.2707 };
 const prompts = ["Is it safe to go for a run?", "What precautions should my family take?", "Explain today's pollution levels"];
 
 // Session-scoped storage keys (cleared when the tab closes — precise coordinates
@@ -158,10 +158,10 @@ function App() {
       (err) => {
         if (!shouldApplyGpsResult(startedRevision, locationRevisionRef.current, requestId, gpsRequestRef.current)) return;
         setGeoBusy(false); setShowGeoBanner(false);
-        const retained = loc.source === "default" ? "Showing the demo city" : "Keeping your selected location";
-        if (err.code === err.PERMISSION_DENIED) setGeoNotice(`Location permission was declined. ${retained} — search for any place below.`);
-        else if (err.code === err.TIMEOUT) setGeoNotice(`Location request timed out. ${retained} — search for any place below.`);
-        else setGeoNotice(`Your position is currently unavailable. ${retained} — search for any place below.`);
+        const retained = loc.source === "default" ? "Showing the default city, Chennai" : "Keeping your selected location";
+        if (err.code === err.PERMISSION_DENIED) setGeoNotice(`Location permission was declined. ${retained} — search for any place above.`);
+        else if (err.code === err.TIMEOUT) setGeoNotice(`Location request timed out. ${retained} — search for any place above.`);
+        else setGeoNotice(`Your position is currently unavailable. ${retained} — search for any place above.`);
       },
       { enableHighAccuracy: false, timeout: 10000, maximumAge: 600000 },
     );
@@ -180,7 +180,7 @@ function App() {
   }
 
   // Initial load: never block on location. Manual selection from earlier in the
-  // session wins; otherwise load the demo city immediately, then decide whether
+  // session wins; otherwise load Chennai immediately, then decide whether
   // to offer geolocation (with an explanation) based on the permission state.
   useEffect(() => {
     const manual = loadSession(KEY_MANUAL);
@@ -198,7 +198,7 @@ function App() {
         if (locationRevisionRef.current !== initialRevision) return;
         if (status.state === "granted") requestGps(); // previously allowed — no extra explanation needed
         else if (status.state === "prompt") setShowGeoBanner(true); // explain first, then request on user action
-        // "denied" → stay on demo city with the search field; never re-prompt
+        // "denied" → stay on the default city with the search field; never re-prompt
       }).catch(() => setShowGeoBanner(true));
     } else {
       setShowGeoBanner(true);
@@ -317,63 +317,65 @@ function App() {
       : freshness;
   const displayDate = formatDateAtLocation(air?.location.timezone);
   return <div className="app-shell">
-    <aside className="sidebar">
+    <header className="site-header">
+      <div className="nav-shell">
       <div className="brand"><div className="brand-icon"><Wind size={22}/></div><div><strong>AirSense<span> AI</span></strong><small>URBAN AIR INTELLIGENCE</small></div></div>
-      <div className="side-label">WORKSPACE</div>
-      <nav aria-label="Dashboard sections">
+      <nav className="primary-nav" aria-label="Dashboard sections">
         <a className="nav" href="#overview"><Activity size={17}/> Overview</a>
-        <a className="nav" href="#assistant"><MessageCircle size={17}/> AI Assistant</a>
         <a className="nav" href="#pollutants"><Compass size={17}/> Pollutants</a>
+        <a className="nav" href="#assistant"><MessageCircle size={17}/> AI Assistant</a>
       </nav>
-      <div className="sidebar-bottom"><div className="privacy"><ShieldCheck size={16}/><div><b>Privacy first</b><small>Location is used for local air data. GPS coordinates are shared directly with BigDataCloud only to name your location, stay in this session, and are never sent to the AI model.</small></div></div><small className="version">AIRSENSE AI · HACKATHON EDITION</small></div>
-    </aside>
+      <div className="nav-actions">
+        <div className="search-row nav-search" ref={searchBoxRef}>
+          <div className="search-box">
+            <Search size={14}/>
+            <input
+              value={searchText}
+              onChange={(e) => setSearchText(e.target.value)}
+              onKeyDown={handleSearchKeyDown}
+              placeholder="Search any city…"
+              aria-label="Search location"
+              role="combobox"
+              aria-autocomplete="list"
+              aria-expanded={searchOpen}
+              aria-controls="location-search-results"
+              aria-activedescendant={activeSearchIndex >= 0 ? `location-result-${activeSearchIndex}` : undefined}
+            />
+            {searchBusy && <RefreshCw className="spin" size={13}/>}
+          </div>
+          {searchOpen && searchResults.length > 0 && <div className="search-results" id="location-search-results" role="listbox" aria-label="Location suggestions">
+            {searchResults.map((r, i) => <button key={`${r.latitude}-${r.longitude}-${i}`} id={`location-result-${i}`} role="option" aria-selected={i === activeSearchIndex} className={i === activeSearchIndex ? "active" : ""} onMouseEnter={() => setActiveSearchIndex(i)} onClick={() => selectSearchResult(r)}>
+              <b>{r.name}</b><span>{[r.region, r.country].filter(Boolean).join(", ")}</span>
+            </button>)}
+          </div>}
+          {searchOpen && !searchBusy && searchResults.length === 0 && <div className="search-results" id="location-search-results">{searchError ? <div className="search-error" role="alert">{searchError}</div> : <div className="search-empty">No places found. Try a different spelling.</div>}</div>}
+        </div>
+        <button className="location-control" aria-label={loc.source === "manual" ? "Back to my location" : "Use my location"} onClick={returnToGps} disabled={geoBusy}>
+          <Crosshair size={15}/><span>{loc.source === "manual" ? "Back to my location" : "Use my location"}</span>
+        </button>
+        <ThemeSelector/>
+      </div>
+      </div>
+    </header>
     <main className="main">
-      <header className="topbar" id="overview"><div><div className="eyebrow">{displayDate}</div><h1>Environmental overview</h1><p>Current modelled air quality and exposure guidance for your selected location.</p></div><div className="top-actions"><ThemeSelector/><button className="outline-btn" onClick={returnToGps} disabled={geoBusy}><Crosshair size={15}/> {loc.source === "manual" ? "Back to my location" : "Use my location"}</button><button className="icon-btn" aria-label="Refresh air-quality data" onClick={() => refresh()} disabled={loading}><RefreshCw className={loading ? "spin" : ""} size={17}/></button></div></header>
-      <nav className="mobile-nav" aria-label="Dashboard sections">
-        <a href="#overview">Overview</a><a href="#pollutants">Pollutants</a><a href="#assistant">AI Assistant</a>
-      </nav>
+      <section className="topbar" id="overview"><div><div className="eyebrow">{displayDate}</div><h1>Environmental overview</h1><p>Current modelled air quality and exposure guidance for your selected location.</p></div><button className="icon-btn" aria-label="Refresh air-quality data" onClick={() => refresh()} disabled={loading}><RefreshCw className={loading ? "spin" : ""} size={17}/></button></section>
 
       {showGeoBanner && <div className="geo-banner" role="dialog" aria-label="Location permission">
         <MapPin size={16}/>
         <div className="geo-banner-text"><b>Use your location?</b><span>AirSense uses your coordinates for local air data and shares them directly with BigDataCloud to display a place name. They stay in this browser session and are never sent to the AI assistant.</span></div>
         <button className="geo-allow" onClick={requestGps} disabled={geoBusy}>{geoBusy ? "Locating…" : "Allow location"}</button>
-        <button className="geo-dismiss" aria-label="Dismiss" onClick={() => { setShowGeoBanner(false); setGeoNotice("No problem — showing the demo city. Search for any place below."); try { sessionStorage.setItem(KEY_GEO_ASKED, "1"); } catch { /* ignore */ } }}><X size={14}/></button>
+        <button className="geo-dismiss" aria-label="Dismiss" onClick={() => { setShowGeoBanner(false); setGeoNotice("No problem — showing the default city, Chennai. Search for any place above."); try { sessionStorage.setItem(KEY_GEO_ASKED, "1"); } catch { /* ignore */ } }}><X size={14}/></button>
       </div>}
 
       <section className="location-row">
         <div className="location-title">
           <MapPin size={16}/>
-          <span className="location-name">{loc.label}</span>
-          <span className={`source-badge ${loc.source}`}>{loc.source === "gps" ? "GPS" : loc.source === "manual" ? "SELECTED" : "DEMO CITY"}</span>
+          <span className="location-name" title={loc.label}>{loc.source === "default" ? "Default · Chennai" : loc.label}</span>
+          <span className={`source-badge ${loc.source}`}>{loc.source === "gps" ? "GPS" : loc.source === "manual" ? "SELECTED" : "DEFAULT"}</span>
           <span className={`data-status ${dataStatus.state}`} role="status">{dataStatus.label}</span>
         </div>
         <span className="muted">{air?.observedAt ? `Updated ${formatAtLocation(air.observedAt, air.location.timezone, { hour: "2-digit", minute: "2-digit" })}` : "Observation time unavailable"}</span>
       </section>
-
-      <div className="search-row" ref={searchBoxRef}>
-        <div className="search-box">
-          <Search size={14}/>
-          <input
-            value={searchText}
-            onChange={(e) => setSearchText(e.target.value)}
-            onKeyDown={handleSearchKeyDown}
-            placeholder="Search any city or place worldwide…"
-            aria-label="Search location"
-            role="combobox"
-            aria-autocomplete="list"
-            aria-expanded={searchOpen}
-            aria-controls="location-search-results"
-            aria-activedescendant={activeSearchIndex >= 0 ? `location-result-${activeSearchIndex}` : undefined}
-          />
-          {searchBusy && <RefreshCw className="spin" size={13}/>}
-        </div>
-        {searchOpen && searchResults.length > 0 && <div className="search-results" id="location-search-results" role="listbox" aria-label="Location suggestions">
-          {searchResults.map((r, i) => <button key={`${r.latitude}-${r.longitude}-${i}`} id={`location-result-${i}`} role="option" aria-selected={i === activeSearchIndex} className={i === activeSearchIndex ? "active" : ""} onMouseEnter={() => setActiveSearchIndex(i)} onClick={() => selectSearchResult(r)}>
-            <b>{r.name}</b><span>{[r.region, r.country].filter(Boolean).join(", ")}</span>
-          </button>)}
-        </div>}
-        {searchOpen && !searchBusy && searchResults.length === 0 && <div className="search-results" id="location-search-results">{searchError ? <div className="search-error" role="alert">{searchError}</div> : <div className="search-empty">No places found. Try a different spelling.</div>}</div>}
-      </div>
 
       {geoNotice && <div className="notice-banner" role="status">{geoNotice}</div>}
       {error && <div className="error-banner" role="alert">{error}</div>}
@@ -427,6 +429,7 @@ function App() {
           <div className="disclaimer">Guidance is informational, not medical advice. Follow local public-health advisories.</div>
         </div>
       </section>
+      <div className="privacy"><ShieldCheck size={16}/><div><b>Privacy first</b><small>Location is used for local air data. GPS coordinates are shared directly with BigDataCloud only to name your location, stay in this session, and are never sent to the AI model.</small></div></div>
       <footer><span><Leaf size={14}/> Make every breath count.</span><span>Data: Open-Meteo · Powered by CAMS · <a href="https://open-meteo.com/" target="_blank" rel="noreferrer">Data attribution</a></span></footer>
     </main>
   </div>;
