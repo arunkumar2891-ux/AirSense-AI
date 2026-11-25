@@ -3,6 +3,7 @@ import { Activity, ArrowUpRight, Bot, Cloud, Compass, Crosshair, HeartPulse, Lea
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { askAssistant, getAirQuality, reverseGeocode, searchLocations } from "./api";
 import type { AirData, ExposureDecision, LocationResult, Profile } from "./types";
+import { getAqiPresentation, getFreshnessPresentation, isLatestRequest, shouldApplyGpsResult, US_AQI_CATEGORIES } from "./reliability";
 
 const fallbackCity = { name: "Hyderabad", lat: 17.385, lon: 78.4867 };
 const prompts = ["Is it safe to go for a run?", "What precautions should my family take?", "Explain today's pollution levels"];
@@ -38,6 +39,22 @@ function formatAtLocation(value: string, timezone: string, options: Intl.DateTim
   }
 }
 
+function formatDateAtLocation(timezone?: string) {
+  try {
+    return new Date().toLocaleDateString([], {
+      weekday: "long", year: "numeric", month: "long", day: "numeric", timeZone: timezone,
+    }).toUpperCase();
+  } catch {
+    return new Date().toLocaleDateString([], {
+      weekday: "long", year: "numeric", month: "long", day: "numeric",
+    }).toUpperCase();
+  }
+}
+
+function capitalizeSentence(value: string) {
+  return value ? value.charAt(0).toUpperCase() + value.slice(1) : value;
+}
+
 function App() {
   const [loc, setLoc] = useState<LocState>({ lat: fallbackCity.lat, lon: fallbackCity.lon, label: fallbackCity.name, source: "default" });
   const [air, setAir] = useState<AirData | null>(null);
@@ -49,6 +66,7 @@ function App() {
   const [thinking, setThinking] = useState(false);
   const [mode, setMode] = useState("");
   const [decision, setDecision] = useState<ExposureDecision | null>(null);
+  const [assistantError, setAssistantError] = useState("");
 
   // Location UX state
   const [showGeoBanner, setShowGeoBanner] = useState(false);
@@ -58,17 +76,43 @@ function App() {
   const [searchResults, setSearchResults] = useState<LocationResult[]>([]);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchBusy, setSearchBusy] = useState(false);
+  const [searchError, setSearchError] = useState("");
+  const [activeSearchIndex, setActiveSearchIndex] = useState(-1);
   const searchBoxRef = useRef<HTMLDivElement | null>(null);
+  const locationRevisionRef = useRef(0);
+  const gpsRequestRef = useRef(0);
+  const airRequestRef = useRef(0);
+  const airAbortRef = useRef<AbortController | null>(null);
+  const searchAbortRef = useRef<AbortController | null>(null);
+  const assistantRequestRef = useRef(0);
+  const assistantAbortRef = useRef<AbortController | null>(null);
 
   async function refresh(lat = loc.lat, lon = loc.lon) {
-    setLoading(true); setError("");
-    try { const data = await getAirQuality(lat, lon); setAir(data); }
-    catch (e) { setError(e instanceof Error ? e.message : "Unable to load data."); }
-    finally { setLoading(false); }
+    const requestId = ++airRequestRef.current;
+    airAbortRef.current?.abort();
+    const controller = new AbortController();
+    airAbortRef.current = controller;
+    setLoading(true); setError(""); setAir(null);
+    try {
+      const data = await getAirQuality(lat, lon, controller.signal);
+      if (isLatestRequest(requestId, airRequestRef.current)) setAir(data);
+    } catch (e) {
+      if (controller.signal.aborted) return;
+      if (isLatestRequest(requestId, airRequestRef.current)) {
+        setError(e instanceof Error ? e.message : "Unable to load environmental data.");
+      }
+    } finally {
+      if (isLatestRequest(requestId, airRequestRef.current)) setLoading(false);
+    }
   }
 
   function applyLocation(next: LocState, persist: boolean) {
+    locationRevisionRef.current += 1;
+    gpsRequestRef.current += 1;
+    setGeoBusy(false);
     setLoc(next);
+    assistantAbortRef.current?.abort();
+    setAnswer(""); setAssistantError(""); setDecision(null); setMode("");
     if (persist) {
       try {
         if (next.source === "gps") { sessionStorage.setItem(KEY_GPS, JSON.stringify(next)); sessionStorage.removeItem(KEY_MANUAL); }
@@ -90,6 +134,8 @@ function App() {
 
   function requestGps() {
     if (!navigator.geolocation) { setGeoNotice("Location is not supported by this browser. Search for a city instead."); setShowGeoBanner(false); return; }
+    const requestId = ++gpsRequestRef.current;
+    const startedRevision = locationRevisionRef.current;
     setGeoBusy(true); setGeoNotice("");
     try { sessionStorage.setItem(KEY_GEO_ASKED, "1"); } catch { /* ignore */ }
     navigator.geolocation.getCurrentPosition(
@@ -97,14 +143,17 @@ function App() {
         const lat = position.coords.latitude;
         const lon = position.coords.longitude;
         const label = await labelGpsLocation(lat, lon);
+        if (!shouldApplyGpsResult(startedRevision, locationRevisionRef.current, requestId, gpsRequestRef.current)) return;
         setGeoBusy(false); setShowGeoBanner(false);
         applyLocation({ lat, lon, label, source: "gps" }, true);
       },
       (err) => {
+        if (!shouldApplyGpsResult(startedRevision, locationRevisionRef.current, requestId, gpsRequestRef.current)) return;
         setGeoBusy(false); setShowGeoBanner(false);
-        if (err.code === err.PERMISSION_DENIED) setGeoNotice("Location permission was declined. Showing the demo city — search for any place below.");
-        else if (err.code === err.TIMEOUT) setGeoNotice("Location request timed out. Showing the demo city — search for any place below.");
-        else setGeoNotice("Your position is currently unavailable. Showing the demo city — search for any place below.");
+        const retained = loc.source === "default" ? "Showing the demo city" : "Keeping your selected location";
+        if (err.code === err.PERMISSION_DENIED) setGeoNotice(`Location permission was declined. ${retained} — search for any place below.`);
+        else if (err.code === err.TIMEOUT) setGeoNotice(`Location request timed out. ${retained} — search for any place below.`);
+        else setGeoNotice(`Your position is currently unavailable. ${retained} — search for any place below.`);
       },
       { enableHighAccuracy: false, timeout: 10000, maximumAge: 600000 },
     );
@@ -118,7 +167,7 @@ function App() {
 
   function selectSearchResult(item: LocationResult) {
     const label = [item.name, item.region, item.country].filter(Boolean).join(", ");
-    setSearchText(""); setSearchResults([]); setSearchOpen(false); setGeoNotice("");
+    setSearchText(""); setSearchResults([]); setSearchOpen(false); setSearchError(""); setActiveSearchIndex(-1); setGeoNotice("");
     applyLocation({ lat: item.latitude, lon: item.longitude, label, source: "manual" }, true);
   }
 
@@ -127,8 +176,9 @@ function App() {
   // to offer geolocation (with an explanation) based on the permission state.
   useEffect(() => {
     const manual = loadSession(KEY_MANUAL);
-    if (manual) { setLoc({ ...manual, source: "manual" }); refresh(manual.lat, manual.lon); }
+    if (manual) applyLocation({ ...manual, source: "manual" }, false);
     else { refresh(fallbackCity.lat, fallbackCity.lon); }
+    const initialRevision = locationRevisionRef.current;
 
     let asked = false;
     try { asked = sessionStorage.getItem(KEY_GEO_ASKED) === "1"; } catch { /* ignore */ }
@@ -137,6 +187,7 @@ function App() {
     const permissions = (navigator as Navigator & { permissions?: { query: (d: { name: string }) => Promise<{ state: string }> } }).permissions;
     if (permissions?.query) {
       permissions.query({ name: "geolocation" }).then((status) => {
+        if (locationRevisionRef.current !== initialRevision) return;
         if (status.state === "granted") requestGps(); // previously allowed — no extra explanation needed
         else if (status.state === "prompt") setShowGeoBanner(true); // explain first, then request on user action
         // "denied" → stay on demo city with the search field; never re-prompt
@@ -147,17 +198,37 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  useEffect(() => () => {
+    airAbortRef.current?.abort();
+    searchAbortRef.current?.abort();
+    assistantAbortRef.current?.abort();
+  }, []);
+
   // Debounced global city search
   useEffect(() => {
     const q = searchText.trim();
-    if (q.length < 2) { setSearchResults([]); setSearchOpen(false); return; }
-    setSearchBusy(true);
+    searchAbortRef.current?.abort();
+    if (q.length < 2) {
+      setSearchResults([]); setSearchOpen(false); setSearchBusy(false); setSearchError(""); setActiveSearchIndex(-1);
+      return;
+    }
+    const controller = new AbortController();
+    searchAbortRef.current = controller;
+    setSearchBusy(true); setSearchOpen(true); setSearchError(""); setActiveSearchIndex(-1);
     const t = setTimeout(async () => {
-      try { const results = await searchLocations(q); setSearchResults(results); setSearchOpen(true); }
-      catch { setSearchResults([]); setSearchOpen(false); }
-      finally { setSearchBusy(false); }
+      try {
+        const results = await searchLocations(q, controller.signal);
+        setSearchResults(results); setSearchOpen(true); setActiveSearchIndex(results.length ? 0 : -1);
+      } catch (e) {
+        if (controller.signal.aborted) return;
+        setSearchResults([]);
+        setSearchError(e instanceof Error ? e.message : "Location search is unavailable.");
+        setSearchOpen(true);
+      } finally {
+        if (!controller.signal.aborted) setSearchBusy(false);
+      }
     }, 300);
-    return () => clearTimeout(t);
+    return () => { clearTimeout(t); controller.abort(); };
   }, [searchText]);
 
   // Close search dropdown on outside click
@@ -169,31 +240,86 @@ function App() {
     return () => document.removeEventListener("mousedown", onClick);
   }, []);
 
+  function handleSearchKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      setSearchOpen(false); setActiveSearchIndex(-1);
+      return;
+    }
+    if (e.key === "ArrowDown" && !searchOpen && searchResults.length > 0) {
+      e.preventDefault();
+      setSearchOpen(true);
+      setActiveSearchIndex(0);
+      return;
+    }
+    if (!searchOpen || searchResults.length === 0) return;
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setActiveSearchIndex((current) => (current + 1) % searchResults.length);
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setActiveSearchIndex((current) => current <= 0 ? searchResults.length - 1 : current - 1);
+    } else if (e.key === "Enter" && activeSearchIndex >= 0) {
+      e.preventDefault();
+      selectSearchResult(searchResults[activeSearchIndex]);
+    }
+  }
+
   const chartData = useMemo(() => air?.hourly.map((item) => ({
     ...item,
     hour: formatAtLocation(item.time, air.location.timezone, { hour: "numeric" }),
   })) || [], [air]);
 
   async function submit(q = question) {
-    if (!q.trim() || !air) return;
-    setThinking(true); setAnswer("");
-    try { const result = await askAssistant(q, profile, { lat: loc.lat, lon: loc.lon }); setAnswer(result.answer); setMode(result.mode); setDecision(result.decision || null); }
-    catch (e) { setAnswer(e instanceof Error ? e.message : "Assistant unavailable."); }
-    finally { setThinking(false); setQuestion(""); }
+    if (!q.trim() || !air || thinking) return;
+    const requestId = ++assistantRequestRef.current;
+    assistantAbortRef.current?.abort();
+    const controller = new AbortController();
+    assistantAbortRef.current = controller;
+    setThinking(true); setAnswer(""); setAssistantError(""); setDecision(null); setMode("");
+    try {
+      const result = await askAssistant(q, profile, { lat: loc.lat, lon: loc.lon }, controller.signal);
+      if (!isLatestRequest(requestId, assistantRequestRef.current)) return;
+      setAnswer(result.answer); setMode(result.mode); setDecision(result.decision || null);
+    } catch (e) {
+      if (controller.signal.aborted) return;
+      if (isLatestRequest(requestId, assistantRequestRef.current)) {
+        setAssistantError(e instanceof Error ? e.message : "Assistant unavailable.");
+      }
+    } finally {
+      if (isLatestRequest(requestId, assistantRequestRef.current)) {
+        setThinking(false); setQuestion("");
+      }
+    }
   }
   const aqi = air?.aqi;
-  const tone = air?.status.color || "slate";
+  const aqiPresentation = getAqiPresentation(aqi);
+  const freshness = aqiPresentation.value === null
+    ? { state: "unavailable", label: "DATA UNAVAILABLE", isFresh: false }
+    : getFreshnessPresentation(air?.observedAt);
+  const tone = aqiPresentation.color;
+  const dataStatus = loading
+    ? { state: "loading", label: "LOADING MODEL DATA" }
+    : error
+      ? { state: "error", label: "DATA ERROR" }
+      : freshness;
+  const displayDate = formatDateAtLocation(air?.location.timezone);
   return <div className="app-shell">
     <aside className="sidebar">
       <div className="brand"><div className="brand-icon"><Wind size={22}/></div><div><strong>AirSense<span> AI</span></strong><small>URBAN AIR INTELLIGENCE</small></div></div>
       <div className="side-label">WORKSPACE</div>
-      <a className="nav active"><Activity size={17}/> Overview</a>
-      <a className="nav"><MessageCircle size={17}/> AI Assistant <span className="nav-dot"/></a>
-      <a className="nav"><Compass size={17}/> Explore areas</a>
+      <nav aria-label="Dashboard sections">
+        <a className="nav" href="#overview"><Activity size={17}/> Overview</a>
+        <a className="nav" href="#assistant"><MessageCircle size={17}/> AI Assistant</a>
+        <a className="nav" href="#pollutants"><Compass size={17}/> Pollutants</a>
+      </nav>
       <div className="sidebar-bottom"><div className="privacy"><ShieldCheck size={16}/><div><b>Privacy first</b><small>Location is used for local air data. GPS coordinates are shared directly with BigDataCloud only to name your location, stay in this session, and are never sent to the AI model.</small></div></div><small className="version">AIRSENSE AI · HACKATHON EDITION</small></div>
     </aside>
     <main className="main">
-      <header className="topbar"><div><div className="eyebrow">WEDNESDAY, NOVEMBER 25, 2026</div><h1>Your air, decoded.</h1></div><div className="top-actions"><button className="outline-btn" onClick={returnToGps} disabled={geoBusy}><Crosshair size={15}/> {loc.source === "manual" ? "Back to my location" : "Use my location"}</button><button className="icon-btn" aria-label="Refresh air quality" onClick={() => refresh()}><RefreshCw size={17}/></button><div className="avatar">A</div></div></header>
+      <header className="topbar" id="overview"><div><div className="eyebrow">{displayDate}</div><h1>Your air, decoded.</h1></div><div className="top-actions"><button className="outline-btn" onClick={returnToGps} disabled={geoBusy}><Crosshair size={15}/> {loc.source === "manual" ? "Back to my location" : "Use my location"}</button><button className="icon-btn" aria-label="Refresh air-quality data" onClick={() => refresh()} disabled={loading}><RefreshCw className={loading ? "spin" : ""} size={17}/></button></div></header>
+      <nav className="mobile-nav" aria-label="Dashboard sections">
+        <a href="#overview">Overview</a><a href="#pollutants">Pollutants</a><a href="#assistant">AI Assistant</a>
+      </nav>
 
       {showGeoBanner && <div className="geo-banner" role="dialog" aria-label="Location permission">
         <MapPin size={16}/>
@@ -207,8 +333,7 @@ function App() {
           <MapPin size={16}/>
           <span className="location-name">{loc.label}</span>
           <span className={`source-badge ${loc.source}`}>{loc.source === "gps" ? "GPS" : loc.source === "manual" ? "SELECTED" : "DEMO CITY"}</span>
-          <span className="live-pill"><i/> LIVE DATA</span>
-          {loc.source === "manual" && <button className="return-gps" onClick={returnToGps} disabled={geoBusy}><Crosshair size={12}/> Back to my location</button>}
+          <span className={`data-status ${dataStatus.state}`} role="status">{dataStatus.label}</span>
         </div>
         <span className="muted">{air?.observedAt ? `Updated ${formatAtLocation(air.observedAt, air.location.timezone, { hour: "2-digit", minute: "2-digit" })}` : "Observation time unavailable"}</span>
       </section>
@@ -216,35 +341,46 @@ function App() {
       <div className="search-row" ref={searchBoxRef}>
         <div className="search-box">
           <Search size={14}/>
-          <input value={searchText} onChange={(e) => setSearchText(e.target.value)} placeholder="Search any city or place worldwide…" aria-label="Search location"/>
+          <input
+            value={searchText}
+            onChange={(e) => setSearchText(e.target.value)}
+            onKeyDown={handleSearchKeyDown}
+            placeholder="Search any city or place worldwide…"
+            aria-label="Search location"
+            role="combobox"
+            aria-autocomplete="list"
+            aria-expanded={searchOpen}
+            aria-controls="location-search-results"
+            aria-activedescendant={activeSearchIndex >= 0 ? `location-result-${activeSearchIndex}` : undefined}
+          />
           {searchBusy && <RefreshCw className="spin" size={13}/>}
         </div>
-        {searchOpen && searchResults.length > 0 && <div className="search-results" role="listbox">
-          {searchResults.map((r, i) => <button key={`${r.latitude}-${r.longitude}-${i}`} role="option" onClick={() => selectSearchResult(r)}>
+        {searchOpen && searchResults.length > 0 && <div className="search-results" id="location-search-results" role="listbox" aria-label="Location suggestions">
+          {searchResults.map((r, i) => <button key={`${r.latitude}-${r.longitude}-${i}`} id={`location-result-${i}`} role="option" aria-selected={i === activeSearchIndex} className={i === activeSearchIndex ? "active" : ""} onMouseEnter={() => setActiveSearchIndex(i)} onClick={() => selectSearchResult(r)}>
             <b>{r.name}</b><span>{[r.region, r.country].filter(Boolean).join(", ")}</span>
           </button>)}
         </div>}
-        {searchOpen && !searchBusy && searchResults.length === 0 && <div className="search-results"><div className="search-empty">No places found. Try a different spelling.</div></div>}
+        {searchOpen && !searchBusy && searchResults.length === 0 && <div className="search-results" id="location-search-results">{searchError ? <div className="search-error" role="alert">{searchError}</div> : <div className="search-empty">No places found. Try a different spelling.</div>}</div>}
       </div>
 
       {geoNotice && <div className="notice-banner" role="status">{geoNotice}</div>}
       {error && <div className="error-banner" role="alert">{error}</div>}
-      <section className="hero-grid">
+      <section className="hero-grid" aria-label="Current air quality">
         <div className={`aqi-card ${tone}`}>
-          <div className="card-top"><span className="section-kicker">CURRENT AIR QUALITY</span><span className="pulse"><i/> LIVE</span></div>
-          <div className="aqi-main"><div><div className="aqi-number">{loading ? "—" : aqi ?? "N/A"}</div><div className="aqi-unit">{air?.aqiScale || "AQI"} INDEX</div></div><div className="aqi-ring"><div><Wind size={28}/><b>{air?.status.level ? `0${air.status.level}` : "--"}</b></div></div></div>
-          <h2>{loading ? "Checking the atmosphere…" : air?.status.label || "Data unavailable"}</h2>
-          <p>{air?.status.advice || "Connect to live environmental data to see local guidance."}</p>
-          <div className="scale"><div className="scale-bar"><i style={{ left: `${Math.min(100, ((aqi || 0) / 300) * 100)}%` }}/></div><div className="scale-labels"><span>Good</span><span>Moderate</span><span>Poor</span><span>Severe</span></div></div>
+          <div className="card-top"><span className="section-kicker">CURRENT MODELLED AIR QUALITY</span><span className={`data-status ${dataStatus.state}`}>{dataStatus.label}</span></div>
+          <div className="aqi-main"><div><div className="aqi-number">{loading ? "…" : aqi ?? "N/A"}</div><div className="aqi-unit">US AQI · 0–500 SCALE</div></div><div className="aqi-ring" aria-label={`Severity level ${aqiPresentation.level || "unavailable"} of 6`}><div><Wind size={28}/><b>{aqiPresentation.level ? `${aqiPresentation.level} / 6` : "N/A"}</b></div></div></div>
+          <h2>{loading ? "Loading environmental estimates…" : aqiPresentation.label}</h2>
+          <p>{error ? "Current environmental estimates could not be loaded. Try again shortly." : aqiPresentation.value === null ? "No current US AQI reading is available. Check an official local monitor." : air?.status.advice}</p>
+          <div className="scale" aria-label="US AQI category scale from 0 to 500"><div className="scale-bar" style={{background:"linear-gradient(90deg,#4acb91 0 10%,#d5d35e 10% 20%,#e89a53 20% 30%,#df6264 30% 40%,#9c6dc0 40% 60%,#873d52 60% 100%)"}}>{aqiPresentation.markerPercent !== null && <i aria-hidden="true" style={{ left: `${aqiPresentation.markerPercent}%` }}/>}</div><div className="scale-labels">{US_AQI_CATEGORIES.map((category) => <span key={category.label}><b>{category.label}</b><small>{category.min}–{category.max}</small></span>)}</div></div>
           <div className="source-note">Source: {air?.source || "Open-Meteo"} · Model estimate</div>
         </div>
         <div className="insight-card">
-          <div className="card-heading"><div><span className="section-kicker">AIR QUALITY OUTLOOK</span><h3>Next 12 hours</h3></div><span className="mini-icon"><Activity size={17}/></span></div>
-          <div className="chart-wrap">{chartData.length ? <ResponsiveContainer width="100%" height="100%"><AreaChart data={chartData}><defs><linearGradient id="aqiFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#39d6b0" stopOpacity={0.28}/><stop offset="100%" stopColor="#39d6b0" stopOpacity={0}/></linearGradient></defs><CartesianGrid stroke="#203543" vertical={false}/><XAxis dataKey="hour" tick={{ fill: "#8196a5", fontSize: 10 }} axisLine={false} tickLine={false}/><YAxis width={28} tick={{ fill: "#8196a5", fontSize: 10 }} axisLine={false} tickLine={false}/><Tooltip contentStyle={{ background: "#102433", border: "1px solid #294253", borderRadius: 10, color: "#fff" }}/><Area type="monotone" dataKey="aqi" stroke="#39d6b0" strokeWidth={2.5} fill="url(#aqiFill)" connectNulls/></AreaChart></ResponsiveContainer> : <div className="chart-empty">{loading ? "Loading forecast…" : "Hourly outlook unavailable"}</div>}</div>
-          <div className="chart-legend"><span><i/> AQI forecast</span><span className="muted">Model forecast · not a station reading</span></div>
+          <div className="card-heading"><div><span className="section-kicker">MODELLED HOURLY ESTIMATES</span><h3>Next 12 hours</h3></div><span className="mini-icon"><Activity size={17}/></span></div>
+          <div className="chart-wrap">{chartData.length ? <ResponsiveContainer width="100%" height="100%"><AreaChart data={chartData}><defs><linearGradient id="aqiFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#39d6b0" stopOpacity={0.28}/><stop offset="100%" stopColor="#39d6b0" stopOpacity={0}/></linearGradient></defs><CartesianGrid stroke="#203543" vertical={false}/><XAxis dataKey="hour" tick={{ fill: "#8196a5", fontSize: 10 }} axisLine={false} tickLine={false}/><YAxis width={28} domain={[0, 500]} tick={{ fill: "#8196a5", fontSize: 10 }} axisLine={false} tickLine={false}/><Tooltip contentStyle={{ background: "#102433", border: "1px solid #294253", borderRadius: 10, color: "#fff" }}/><Area type="monotone" dataKey="aqi" stroke="#39d6b0" strokeWidth={2.5} fill="url(#aqiFill)" connectNulls/></AreaChart></ResponsiveContainer> : <div className="chart-empty">{loading ? "Loading model forecast…" : error ? "Forecast unavailable because data could not be loaded." : "Hourly model forecast unavailable."}</div>}</div>
+          <div className="chart-legend"><span><i/> US AQI forecast</span><span className="muted">Model estimate · not a sensor reading</span></div>
         </div>
       </section>
-      <section className="section-block"><div className="section-header"><div><span className="section-kicker">WHAT'S IN THE AIR</span><h2>Pollutant breakdown</h2></div><span className="muted">Concentration · µg/m³ where applicable</span></div>
+      <section className="section-block" id="pollutants"><div className="section-header"><div><span className="section-kicker">WHAT'S IN THE AIR</span><h2>Pollutant breakdown</h2></div><span className="muted">Modelled concentration · µg/m³ where applicable</span></div>
         <div className="pollutant-grid">
           <Pollutant name="PM2.5" value={air?.pollutants.pm25} unit="µg/m³" icon={<Cloud/>} desc="Fine particles"/>
           <Pollutant name="PM10" value={air?.pollutants.pm10} unit="µg/m³" icon={<Wind/>} desc="Coarse particles"/>
@@ -252,24 +388,25 @@ function App() {
           <Pollutant name="Nitrogen dioxide" value={air?.pollutants.nitrogenDioxide} unit="µg/m³" icon={<Cloud/>} desc="Traffic-related gas"/>
         </div>
       </section>
-      <section className="section-block assistant-section"><div className="section-header"><div><span className="section-kicker">YOUR PERSONAL AIR GUIDE</span><h2>Ask AirSense AI</h2><p className="muted">Grounded in local readings and your activity context.</p></div><div className="ai-mark"><Bot size={20}/> AI POWERED</div></div>
+      <section className="section-block assistant-section" id="assistant"><div className="section-header"><div><span className="section-kicker">YOUR PERSONAL AIR GUIDE</span><h2>Ask AirSense AI</h2><p className="muted">Grounded in local model estimates and your activity context.</p></div><div className="ai-mark"><Bot size={20}/> AI ASSISTED</div></div>
         <div className="assistant-card">
           <div className="profile-row"><div className="profile-heading"><HeartPulse size={17}/><b>Personalize your guidance</b></div><div className="profile-controls"><label>Activity<select value={profile.activity} onChange={e => setProfile({...profile, activity:e.target.value})}><option value="running">Running</option><option value="cycling">Cycling</option><option value="outdoor workout">Outdoor workout</option><option value="sports">Sports</option><option value="commuting">Commuting</option><option value="daily activities">Daily activities</option><option value="children's outdoor play">Children's outdoor play</option></select></label><label>Profile<select value={profile.ageGroup} onChange={e => setProfile({...profile, ageGroup:e.target.value})}><option value="adult">Adult</option><option value="child">Child</option><option value="older adult">Older adult</option></select></label><label>Sensitivity<select value={profile.sensitivity} onChange={e => setProfile({...profile, sensitivity:e.target.value})}><option value="general">General</option><option value="respiratory sensitivity">Respiratory sensitivity</option><option value="heart or lung condition">Heart/lung condition</option></select></label></div></div>
-          <div className="prompt-list">{prompts.map(p => <button key={p} onClick={() => submit(p)}>{p}<ArrowUpRight size={13}/></button>)}</div>
+          <div className="prompt-list">{prompts.map(p => <button key={p} onClick={() => submit(p)} disabled={thinking || !air}>{p}<ArrowUpRight size={13}/></button>)}</div>
           {decision && <div className="decision-card">
             <div className="decision-top">
               <span className={`risk-pill ${decision.overallRisk}`}>{decision.overallRisk.replace("_", " ").toUpperCase()}</span>
               <span className={`rec-pill ${decision.activityRecommendation}`}>{decision.activityRecommendation.replace("_", " ").toUpperCase()}</span>
               <span className="muted" style={{fontSize: "0.75rem"}}>{decision.dataFreshness.label}</span>
             </div>
-            <p className="decision-action">{decision.recommendedAction}</p>
+            <p className="decision-action">{capitalizeSentence(decision.recommendedAction)}</p>
             <p className="decision-reasoning">{decision.reasoning}</p>
             {decision.sensitiveGroupAdvice !== "No additional sensitivity concerns for this profile." && <p className="decision-sensitive">{decision.sensitiveGroupAdvice}</p>}
             {decision.activityRecommendation !== "suitable" && <p className="decision-alt"><b>Alternative:</b> {decision.alternativeActivity}</p>}
             <p className="decision-limitations">{decision.limitations}</p>
           </div>}
           {answer && <div className="answer-box"><div className="answer-title"><Bot size={16}/> AirSense says <span>{mode === "ai" ? "GENERATIVE AI" : "SAFETY ENGINE"}</span></div><p>{answer}</p></div>}
-          <form className="chat-input" onSubmit={e => {e.preventDefault(); submit();}}><input value={question} onChange={e => setQuestion(e.target.value)} placeholder="Ask about your air quality, activities or precautions…" aria-label="Ask AirSense AI"/><button disabled={thinking || !air} aria-label="Send question">{thinking ? <RefreshCw className="spin" size={17}/> : <Send size={17}/>}</button></form>
+          {assistantError && <div className="assistant-error" role="alert"><b>Assistant unavailable</b><span>{assistantError}</span></div>}
+          <form className="chat-input" onSubmit={e => {e.preventDefault(); submit();}}><input value={question} onChange={e => setQuestion(e.target.value)} disabled={thinking || !air} placeholder={air ? "Ask about air quality, activities or precautions…" : "Load environmental data to ask a question"} aria-label="Ask AirSense AI"/><button disabled={thinking || !air || !question.trim()} aria-label="Send question">{thinking ? <RefreshCw className="spin" size={17}/> : <Send size={17}/>}</button></form>
           <div className="disclaimer">Guidance is informational, not medical advice. Follow local public-health advisories.</div>
         </div>
       </section>

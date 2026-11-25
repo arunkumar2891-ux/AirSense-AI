@@ -1,6 +1,6 @@
 // ---------- AQI classification (US EPA) ----------
 export function getAQIStatus(value) {
-  if (value === null || value === undefined || value === "" || !Number.isFinite(Number(value)) || Number(value) < 0) return { label: "Unavailable", color: "slate", level: 0, advice: "Live AQI is unavailable. Check your local monitoring authority." };
+  if (value === null || value === undefined || value === "" || !Number.isFinite(Number(value)) || Number(value) < 0) return { label: "Unavailable", color: "slate", level: 0, advice: "Current US AQI is unavailable. Check your local monitoring authority." };
   const aqi = Number(value);
   if (aqi <= 50) return { label: "Good", color: "green", level: 1, advice: "Air quality is generally satisfactory for outdoor activities." };
   if (aqi <= 100) return { label: "Moderate", color: "yellow", level: 2, advice: "Most people can continue usual activities; unusually sensitive people should monitor symptoms." };
@@ -67,7 +67,7 @@ export function buildExposureDecision(air = {}, profile = {}) {
       recommendedAction: "Check a local regulatory monitoring station before making exposure decisions.",
       reasoning: "No valid AQI reading is available from the provider. Decisions require current data.",
       sensitiveGroupAdvice: isSensitive ? "Without current data, sensitive individuals should avoid prolonged outdoor exertion as a precaution." : "No specific guidance available without data.",
-      alternativeActivity: "Indoor activities are a safe default until live readings resume.",
+      alternativeActivity: "Consider indoor activities until current readings resume.",
       dataFreshness: freshness,
       limitations: "AQI unavailable from provider. No forecast or historical trend can substitute for current readings. Always follow official local public-health advisories.",
     };
@@ -222,10 +222,13 @@ export function buildDeterministicAnswer(air = {}, decision) {
   const aqiText = Number.isFinite(Number(air.aqi)) && Number(air.aqi) >= 0
     ? `The reported ${air.aqiScale || "AQI"} is ${Number(air.aqi)} (${getAQIStatus(air.aqi).label}).`
     : "Current air-quality data is unavailable.";
+  const action = decision.recommendedAction
+    ? decision.recommendedAction.charAt(0).toUpperCase() + decision.recommendedAction.slice(1)
+    : "";
   return [
     aqiText,
     `Environmental exposure recommendation: ${decision.activityRecommendation.replace("_", " ")}.`,
-    decision.recommendedAction,
+    action,
     decision.reasoning,
     "This is an environmental exposure recommendation, not medical advice.",
   ].filter(Boolean).join(" ");

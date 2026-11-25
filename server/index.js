@@ -276,7 +276,7 @@ app.get("/api/air-quality", rateLimiters.airQuality.middleware, async (req, res)
     res.json(data);
   } catch (error) {
     const code = isTimeoutError(error) ? 504 : 502;
-    res.status(code).json({ error: "Live environmental data is temporarily unavailable." });
+    res.status(code).json({ error: "Current environmental data is temporarily unavailable." });
   }
 });
 

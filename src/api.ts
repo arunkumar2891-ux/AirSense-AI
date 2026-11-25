@@ -1,15 +1,16 @@
 import type { AirData, AssistantResponse, LocationResult, Profile } from "./types";
 
-export async function getAirQuality(lat: number, lon: number): Promise<AirData> {
-  const response = await fetch(`/api/air-quality?lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}`);
+export async function getAirQuality(lat: number, lon: number, signal?: AbortSignal): Promise<AirData> {
+  const response = await fetch(`/api/air-quality?lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}`, { signal });
   if (!response.ok) throw new Error((await response.json()).error || "Unable to load air quality.");
   return response.json();
 }
 
-export async function askAssistant(question: string, profile: Profile, coords: { lat: number; lon: number }) {
+export async function askAssistant(question: string, profile: Profile, coords: { lat: number; lon: number }, signal?: AbortSignal) {
   const response = await fetch("/api/assistant", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
+    signal,
     // Server fetches trusted environmental data itself; only coordinates are sent.
     body: JSON.stringify({ question, profile, latitude: coords.lat, longitude: coords.lon }),
   });
@@ -18,8 +19,8 @@ export async function askAssistant(question: string, profile: Profile, coords: {
   return data as AssistantResponse;
 }
 
-export async function searchLocations(query: string): Promise<LocationResult[]> {
-  const response = await fetch(`/api/geocode?q=${encodeURIComponent(query)}`);
+export async function searchLocations(query: string, signal?: AbortSignal): Promise<LocationResult[]> {
+  const response = await fetch(`/api/geocode?q=${encodeURIComponent(query)}`, { signal });
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || "Location search failed.");
   return data.results as LocationResult[];

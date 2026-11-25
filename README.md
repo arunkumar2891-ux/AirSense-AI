@@ -11,7 +11,7 @@ Urban air quality assistant.
 People often see an AQI number but do not know what it means for their planned activity, household context, or exposure. AirSense AI translates environmental measurements into understandable guidance while clearly communicating uncertainty.
 
 ## Features
-- Live modeled air-quality data and weather for selected cities or browser geolocation
+- Current modeled air-quality data and weather for selected cities or browser geolocation
 - US AQI, pollutant concentrations and a 12-hour outlook
 - Personalized guidance using activity, age group and sensitivity context
 - Optional Gemini or Groq conversational reasoning, with deterministic fallback
