@@ -1,0 +1,28 @@
+{
+  "name": "AirSense-AI",
+  "install": "npm ci",
+  "terminals": [
+    {
+      "name": "dev",
+      "command": "npm run dev",
+      "description": "Vite client (5173) and Express API (10000)"
+    }
+  ],
+  "ports": [
+    {
+      "name": "vite",
+      "port": 5173
+    },
+    {
+      "name": "api",
+      "port": 10000
+    }
+  ],
+  "chromeExecutablePath": "/usr/local/bin/google-chrome",
+  "mcpServerAllowlist": [
+    {
+      "name": "chrome-devtools",
+      "command": "npx"
+    }
+  ]
+}

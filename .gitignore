@@ -6,3 +6,17 @@ dist/
 .DS_Store
 coverage/
 *.log
+
+# Cursor agent config (commit skills, references, and MCP/env templates)
+.cursor/*
+!.cursor/skills/
+!.cursor/skills/**
+!.cursor/references/
+!.cursor/references/**
+!.cursor/mcp.json
+!.cursor/environment.json
+
+# Restored from skills-lock.json via: npx skills experimental_install -y
+.agents/skills/**
+!.agents/skills/brag/
+!.agents/skills/brag/**
