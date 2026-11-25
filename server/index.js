@@ -5,6 +5,7 @@ import helmet from "helmet";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { getAQIStatus, buildRecommendationContext } from "./logic.js";
+import { askGemini } from "./gemini.js";
 
 dotenv.config();
 
@@ -251,55 +252,15 @@ app.post("/api/assistant", assistantRateLimiter, async (req, res) => {
   }
 
   const context = buildRecommendationContext(trusted, profile, question);
-  try {
-    const answer = await askAI(question, context);
-    return res.json({ answer, mode: process.env.AI_API_KEY ? "ai" : "rules", context });
-  } catch {
-    return res.json({
-      answer: context.answer,
-      mode: "rules-fallback",
-      note: "AI provider unavailable; using the local safety guidance engine.",
-    });
-  }
+  const result = await askGemini(question, context, trusted);
+  return res.json({
+    answer: result.answer,
+    mode: result.mode,
+    ...(result.structured ? { structured: result.structured } : {}),
+    ...(result.note ? { note: result.note } : {}),
+    context,
+  });
 });
-
-async function askAI(question, context) {
-  if (!process.env.AI_API_KEY) return context.answer;
-  const provider = (process.env.AI_PROVIDER || "groq").toLowerCase();
-  const model = process.env.AI_MODEL || (provider === "gemini" ? "gemini-2.0-flash" : "llama-3.3-70b-versatile");
-  const system = `You are AirSense AI, a cautious urban air quality assistant. Use ONLY the supplied environmental facts. Never invent readings, forecasts, diagnoses, or medical certainty. Do not claim a route is cleaner without route-specific data. Give concise practical advice, explain uncertainty, and recommend official local guidance for high-risk decisions. Context: ${JSON.stringify(context)}`;
-  if (provider === "gemini") {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
-    const r = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "x-goog-api-key": process.env.AI_API_KEY },
-      body: JSON.stringify({
-        systemInstruction: { parts: [{ text: system }] },
-        contents: [{ role: "user", parts: [{ text: question }] }],
-        generationConfig: { temperature: 0.25, maxOutputTokens: 450 },
-      }),
-      signal: AbortSignal.timeout(18000),
-    });
-    if (!r.ok) throw new Error(`Gemini error ${r.status}`);
-    const data = await r.json();
-    return data.candidates?.[0]?.content?.parts?.map((p) => p.text).join("") || context.answer;
-  }
-  if (provider === "groq") {
-    const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${process.env.AI_API_KEY}` },
-      body: JSON.stringify({
-        model, temperature: 0.25, max_tokens: 450,
-        messages: [{ role: "system", content: system }, { role: "user", content: question }],
-      }),
-      signal: AbortSignal.timeout(18000),
-    });
-    if (!r.ok) throw new Error(`Groq error ${r.status}`);
-    const data = await r.json();
-    return data.choices?.[0]?.message?.content || context.answer;
-  }
-  throw new Error("Unsupported AI_PROVIDER. Use gemini or groq.");
-}
 
 // ---------- Static frontend + SPA fallback ----------
 app.use(express.static(path.join(__dirname, "../dist")));

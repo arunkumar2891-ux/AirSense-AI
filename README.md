@@ -53,23 +53,25 @@ Frontend: `http://localhost:5173`
 Backend: `http://localhost:10000`
 
 ## AI configuration
-Set these in `.env` (never commit the real key):
+Set these in `.env` (never commit the real key). AirSense uses the official `@google/genai` SDK with structured JSON output.
 
 ```env
 AI_PROVIDER=gemini
 AI_API_KEY=your_key
-AI_MODEL=gemini-2.0-flash
+AI_MODEL=gemini-3.8-flash
 ```
 
-Or use Groq:
+Model identifier verified against the [official Gemini API model list](https://ai.google.dev/gemini-api/docs/models). `gemini-3.8-flash` is the current stable Flash model (released September 2026).
+
+Optional tuning:
 
 ```env
-AI_PROVIDER=groq
-AI_API_KEY=your_key
-AI_MODEL=llama-3.3-70b-versatile
+AI_TIMEOUT_MS=18000      # request timeout
+AI_MAX_RETRIES=2         # retries on transient errors (429, 500, 503)
+AI_MAX_OUTPUT_TOKENS=1024 # keep responses concise
 ```
 
-If no key is configured, AirSense uses its deterministic safety guidance engine.
+If no key is configured, AirSense uses its deterministic safety guidance engine. If Gemini fails after retries, the app falls back to the same deterministic engine and reports `mode: "rules-fallback"`.
 
 ## Test and build
 ```bash
