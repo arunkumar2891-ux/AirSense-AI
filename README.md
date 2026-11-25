@@ -16,7 +16,7 @@ People often see an AQI number but do not know what it means for their planned a
 - Personalized guidance using activity, age group and sensitivity context
 - Optional Gemini or Groq conversational reasoning, with deterministic fallback
 - Server-side API proxy, short-lived cache, input validation and health endpoint
-- Responsive dashboard and accessible form controls
+- Responsive, accessible dashboard with persisted Light, Dark and System themes
 
 ## Architecture
 - React + TypeScript + Vite frontend

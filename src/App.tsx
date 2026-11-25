@@ -4,6 +4,7 @@ import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YA
 import { askAssistant, getAirQuality, reverseGeocode, searchLocations } from "./api";
 import type { AirData, ExposureDecision, LocationResult, Profile } from "./types";
 import { getAqiPresentation, getFreshnessPresentation, isLatestRequest, shouldApplyGpsResult, US_AQI_CATEGORIES } from "./reliability";
+import ThemeSelector from "./ThemeSelector";
 
 const fallbackCity = { name: "Hyderabad", lat: 17.385, lon: 78.4867 };
 const prompts = ["Is it safe to go for a run?", "What precautions should my family take?", "Explain today's pollution levels"];
@@ -55,6 +56,12 @@ function capitalizeSentence(value: string) {
   return value ? value.charAt(0).toUpperCase() + value.slice(1) : value;
 }
 
+function formatWeatherValue(value: number | string | null | undefined, unit: string) {
+  if (value === null || value === undefined || value === "") return "N/A";
+  const number = Number(value);
+  return Number.isFinite(number) ? `${Math.round(number)}${unit}` : "N/A";
+}
+
 function App() {
   const [loc, setLoc] = useState<LocState>({ lat: fallbackCity.lat, lon: fallbackCity.lon, label: fallbackCity.name, source: "default" });
   const [air, setAir] = useState<AirData | null>(null);
@@ -86,6 +93,7 @@ function App() {
   const searchAbortRef = useRef<AbortController | null>(null);
   const assistantRequestRef = useRef(0);
   const assistantAbortRef = useRef<AbortController | null>(null);
+  const assistantResultRef = useRef<HTMLDivElement | null>(null);
 
   async function refresh(lat = loc.lat, lon = loc.lon) {
     const requestId = ++airRequestRef.current;
@@ -204,6 +212,10 @@ function App() {
     assistantAbortRef.current?.abort();
   }, []);
 
+  useEffect(() => {
+    if (!thinking && (answer || assistantError)) assistantResultRef.current?.focus();
+  }, [answer, assistantError, thinking]);
+
   // Debounced global city search
   useEffect(() => {
     const q = searchText.trim();
@@ -316,7 +328,7 @@ function App() {
       <div className="sidebar-bottom"><div className="privacy"><ShieldCheck size={16}/><div><b>Privacy first</b><small>Location is used for local air data. GPS coordinates are shared directly with BigDataCloud only to name your location, stay in this session, and are never sent to the AI model.</small></div></div><small className="version">AIRSENSE AI · HACKATHON EDITION</small></div>
     </aside>
     <main className="main">
-      <header className="topbar" id="overview"><div><div className="eyebrow">{displayDate}</div><h1>Your air, decoded.</h1></div><div className="top-actions"><button className="outline-btn" onClick={returnToGps} disabled={geoBusy}><Crosshair size={15}/> {loc.source === "manual" ? "Back to my location" : "Use my location"}</button><button className="icon-btn" aria-label="Refresh air-quality data" onClick={() => refresh()} disabled={loading}><RefreshCw className={loading ? "spin" : ""} size={17}/></button></div></header>
+      <header className="topbar" id="overview"><div><div className="eyebrow">{displayDate}</div><h1>Environmental overview</h1><p>Current modelled air quality and exposure guidance for your selected location.</p></div><div className="top-actions"><ThemeSelector/><button className="outline-btn" onClick={returnToGps} disabled={geoBusy}><Crosshair size={15}/> {loc.source === "manual" ? "Back to my location" : "Use my location"}</button><button className="icon-btn" aria-label="Refresh air-quality data" onClick={() => refresh()} disabled={loading}><RefreshCw className={loading ? "spin" : ""} size={17}/></button></div></header>
       <nav className="mobile-nav" aria-label="Dashboard sections">
         <a href="#overview">Overview</a><a href="#pollutants">Pollutants</a><a href="#assistant">AI Assistant</a>
       </nav>
@@ -365,18 +377,24 @@ function App() {
 
       {geoNotice && <div className="notice-banner" role="status">{geoNotice}</div>}
       {error && <div className="error-banner" role="alert">{error}</div>}
+      <section className="context-strip" aria-label="Current weather context">
+        <ContextMetric label="Temperature" value={formatWeatherValue(air?.weather.temperature_2m, "°C")}/>
+        <ContextMetric label="Feels like" value={formatWeatherValue(air?.weather.apparent_temperature, "°C")}/>
+        <ContextMetric label="Humidity" value={formatWeatherValue(air?.weather.relative_humidity_2m, "%")}/>
+        <ContextMetric label="Wind" value={formatWeatherValue(air?.weather.wind_speed_10m, " km/h")}/>
+      </section>
       <section className="hero-grid" aria-label="Current air quality">
         <div className={`aqi-card ${tone}`}>
           <div className="card-top"><span className="section-kicker">CURRENT MODELLED AIR QUALITY</span><span className={`data-status ${dataStatus.state}`}>{dataStatus.label}</span></div>
           <div className="aqi-main"><div><div className="aqi-number">{loading ? "…" : aqi ?? "N/A"}</div><div className="aqi-unit">US AQI · 0–500 SCALE</div></div><div className="aqi-ring" aria-label={`Severity level ${aqiPresentation.level || "unavailable"} of 6`}><div><Wind size={28}/><b>{aqiPresentation.level ? `${aqiPresentation.level} / 6` : "N/A"}</b></div></div></div>
           <h2>{loading ? "Loading environmental estimates…" : aqiPresentation.label}</h2>
           <p>{error ? "Current environmental estimates could not be loaded. Try again shortly." : aqiPresentation.value === null ? "No current US AQI reading is available. Check an official local monitor." : air?.status.advice}</p>
-          <div className="scale" aria-label="US AQI category scale from 0 to 500"><div className="scale-bar" style={{background:"linear-gradient(90deg,#4acb91 0 10%,#d5d35e 10% 20%,#e89a53 20% 30%,#df6264 30% 40%,#9c6dc0 40% 60%,#873d52 60% 100%)"}}>{aqiPresentation.markerPercent !== null && <i aria-hidden="true" style={{ left: `${aqiPresentation.markerPercent}%` }}/>}</div><div className="scale-labels">{US_AQI_CATEGORIES.map((category) => <span key={category.label}><b>{category.label}</b><small>{category.min}–{category.max}</small></span>)}</div></div>
+          <div className="scale" aria-label="US AQI category scale from 0 to 500"><div className="scale-bar">{aqiPresentation.markerPercent !== null && <i aria-hidden="true" style={{ left: `${aqiPresentation.markerPercent}%` }}/>}</div><div className="scale-labels">{US_AQI_CATEGORIES.map((category) => <span key={category.label}><b>{category.label}</b><small>{category.min}–{category.max}</small></span>)}</div></div>
           <div className="source-note">Source: {air?.source || "Open-Meteo"} · Model estimate</div>
         </div>
         <div className="insight-card">
           <div className="card-heading"><div><span className="section-kicker">MODELLED HOURLY ESTIMATES</span><h3>Next 12 hours</h3></div><span className="mini-icon"><Activity size={17}/></span></div>
-          <div className="chart-wrap">{chartData.length ? <ResponsiveContainer width="100%" height="100%"><AreaChart data={chartData}><defs><linearGradient id="aqiFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#39d6b0" stopOpacity={0.28}/><stop offset="100%" stopColor="#39d6b0" stopOpacity={0}/></linearGradient></defs><CartesianGrid stroke="#203543" vertical={false}/><XAxis dataKey="hour" tick={{ fill: "#8196a5", fontSize: 10 }} axisLine={false} tickLine={false}/><YAxis width={28} domain={[0, 500]} tick={{ fill: "#8196a5", fontSize: 10 }} axisLine={false} tickLine={false}/><Tooltip contentStyle={{ background: "#102433", border: "1px solid #294253", borderRadius: 10, color: "#fff" }}/><Area type="monotone" dataKey="aqi" stroke="#39d6b0" strokeWidth={2.5} fill="url(#aqiFill)" connectNulls/></AreaChart></ResponsiveContainer> : <div className="chart-empty">{loading ? "Loading model forecast…" : error ? "Forecast unavailable because data could not be loaded." : "Hourly model forecast unavailable."}</div>}</div>
+          <div className="chart-wrap">{chartData.length ? <ResponsiveContainer width="100%" height="100%"><AreaChart data={chartData}><defs><linearGradient id="aqiFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="var(--blue-readable)" stopOpacity={0.2}/><stop offset="100%" stopColor="var(--blue-readable)" stopOpacity={0}/></linearGradient></defs><CartesianGrid stroke="var(--chart-grid)" vertical={false}/><XAxis dataKey="hour" tick={{ fill: "var(--text-muted)", fontSize: 11 }} axisLine={false} tickLine={false}/><YAxis width={32} domain={[0, (maximum: number) => Math.min(500, Math.max(100, Math.ceil(maximum / 50) * 50))]} tick={{ fill: "var(--text-muted)", fontSize: 11 }} axisLine={false} tickLine={false}/><Tooltip contentStyle={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, color: "var(--text)" }} cursor={{stroke:"var(--border-strong)"}}/><Area type="monotone" dataKey="aqi" stroke="var(--blue-readable)" strokeWidth={2.5} fill="url(#aqiFill)" connectNulls/></AreaChart></ResponsiveContainer> : <div className="chart-empty">{loading ? "Loading model forecast…" : error ? "Forecast unavailable because data could not be loaded." : "Hourly model forecast unavailable."}</div>}</div>
           <div className="chart-legend"><span><i/> US AQI forecast</span><span className="muted">Model estimate · not a sensor reading</span></div>
         </div>
       </section>
@@ -396,7 +414,6 @@ function App() {
             <div className="decision-top">
               <span className={`risk-pill ${decision.overallRisk}`}>{decision.overallRisk.replace("_", " ").toUpperCase()}</span>
               <span className={`rec-pill ${decision.activityRecommendation}`}>{decision.activityRecommendation.replace("_", " ").toUpperCase()}</span>
-              <span className="muted" style={{fontSize: "0.75rem"}}>{decision.dataFreshness.label}</span>
             </div>
             <p className="decision-action">{capitalizeSentence(decision.recommendedAction)}</p>
             <p className="decision-reasoning">{decision.reasoning}</p>
@@ -404,8 +421,8 @@ function App() {
             {decision.activityRecommendation !== "suitable" && <p className="decision-alt"><b>Alternative:</b> {decision.alternativeActivity}</p>}
             <p className="decision-limitations">{decision.limitations}</p>
           </div>}
-          {answer && <div className="answer-box"><div className="answer-title"><Bot size={16}/> AirSense says <span>{mode === "ai" ? "GENERATIVE AI" : "SAFETY ENGINE"}</span></div><p>{answer}</p></div>}
-          {assistantError && <div className="assistant-error" role="alert"><b>Assistant unavailable</b><span>{assistantError}</span></div>}
+          {answer && <div className="answer-box" ref={assistantResultRef} tabIndex={-1}><div className="answer-title"><Bot size={16}/> AirSense says <span>{mode === "ai" ? "GENERATIVE AI" : "SAFETY ENGINE"}</span></div><p>{answer}</p></div>}
+          {assistantError && <div className="assistant-error" ref={assistantResultRef} tabIndex={-1} role="alert"><b>Assistant unavailable</b><span>{assistantError}</span></div>}
           <form className="chat-input" onSubmit={e => {e.preventDefault(); submit();}}><input value={question} onChange={e => setQuestion(e.target.value)} disabled={thinking || !air} placeholder={air ? "Ask about air quality, activities or precautions…" : "Load environmental data to ask a question"} aria-label="Ask AirSense AI"/><button disabled={thinking || !air || !question.trim()} aria-label="Send question">{thinking ? <RefreshCw className="spin" size={17}/> : <Send size={17}/>}</button></form>
           <div className="disclaimer">Guidance is informational, not medical advice. Follow local public-health advisories.</div>
         </div>
@@ -416,5 +433,8 @@ function App() {
 }
 function Pollutant({name,value,unit,icon,desc}:{name:string;value:number|null|undefined;unit:string;icon:React.ReactNode;desc:string}) {
   return <div className="pollutant-card"><div className="pollutant-top"><span className="pollutant-icon">{icon}</span><span className="muted">{desc}</span></div><div className="pollutant-value">{value == null ? "—" : Number(value).toFixed(1)} <small>{unit}</small></div><b>{name}</b></div>;
+}
+function ContextMetric({label,value}:{label:string;value:string}) {
+  return <div><span>{label}</span><strong>{value}</strong></div>;
 }
 export default App;
