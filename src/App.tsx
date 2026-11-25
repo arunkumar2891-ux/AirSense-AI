@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Activity, ArrowDownRight, ArrowUpRight, Bot, Cloud, Compass, Crosshair, HeartPulse, Leaf, MapPin, MessageCircle, RefreshCw, Send, ShieldCheck, Wind } from "lucide-react";
+import { Activity, ArrowUpRight, Bot, Cloud, Compass, Crosshair, HeartPulse, Leaf, MapPin, MessageCircle, RefreshCw, Send, ShieldCheck, Wind } from "lucide-react";
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { askAssistant, getAirQuality } from "./api";
 import type { AirData, Profile } from "./types";
