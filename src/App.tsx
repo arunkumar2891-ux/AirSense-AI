@@ -1,14 +1,35 @@
-import { useEffect, useMemo, useState } from "react";
-import { Activity, ArrowUpRight, Bot, Cloud, Compass, Crosshair, HeartPulse, Leaf, MapPin, MessageCircle, RefreshCw, Send, ShieldCheck, Wind } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Activity, ArrowUpRight, Bot, Cloud, Compass, Crosshair, HeartPulse, Leaf, MapPin, MessageCircle, RefreshCw, Search, Send, ShieldCheck, Wind, X } from "lucide-react";
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
-import { askAssistant, getAirQuality } from "./api";
-import type { AirData, ExposureDecision, Profile } from "./types";
+import { askAssistant, getAirQuality, reverseGeocode, searchLocations } from "./api";
+import type { AirData, ExposureDecision, LocationResult, Profile } from "./types";
 
 const fallbackCity = { name: "Hyderabad", lat: 17.385, lon: 78.4867 };
 const prompts = ["Is it safe to go for a run?", "What precautions should my family take?", "Explain today's pollution levels"];
+
+// Session-scoped storage keys (cleared when the tab closes — precise coordinates
+// are never persisted beyond the session).
+const KEY_MANUAL = "airsense.manual";
+const KEY_GPS = "airsense.gps";
+const KEY_GEO_ASKED = "airsense.geoAsked";
+
+type LocSource = "gps" | "manual" | "default";
+type LocState = { lat: number; lon: number; label: string; source: LocSource };
+
+function loadSession(key: string): LocState | null {
+  try {
+    const raw = sessionStorage.getItem(key);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (Number.isFinite(parsed?.lat) && Number.isFinite(parsed?.lon) && typeof parsed?.label === "string") {
+      return { lat: parsed.lat, lon: parsed.lon, label: parsed.label, source: parsed.source === "gps" ? "gps" : "manual" };
+    }
+  } catch { /* ignore corrupt session data */ }
+  return null;
+}
+
 function App() {
-  const [city, setCity] = useState(fallbackCity.name);
-  const [coords, setCoords] = useState({ lat: fallbackCity.lat, lon: fallbackCity.lon });
+  const [loc, setLoc] = useState<LocState>({ lat: fallbackCity.lat, lon: fallbackCity.lon, label: fallbackCity.name, source: "default" });
   const [air, setAir] = useState<AirData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -19,35 +40,131 @@ function App() {
   const [mode, setMode] = useState("");
   const [decision, setDecision] = useState<ExposureDecision | null>(null);
 
-  async function refresh(lat = coords.lat, lon = coords.lon) {
+  // Location UX state
+  const [showGeoBanner, setShowGeoBanner] = useState(false);
+  const [geoBusy, setGeoBusy] = useState(false);
+  const [geoNotice, setGeoNotice] = useState("");
+  const [searchText, setSearchText] = useState("");
+  const [searchResults, setSearchResults] = useState<LocationResult[]>([]);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchBusy, setSearchBusy] = useState(false);
+  const searchBoxRef = useRef<HTMLDivElement | null>(null);
+
+  async function refresh(lat = loc.lat, lon = loc.lon) {
     setLoading(true); setError("");
     try { const data = await getAirQuality(lat, lon); setAir(data); }
     catch (e) { setError(e instanceof Error ? e.message : "Unable to load data."); }
     finally { setLoading(false); }
   }
-  useEffect(() => { refresh(); }, []);
+
+  function applyLocation(next: LocState, persist: boolean) {
+    setLoc(next);
+    if (persist) {
+      try {
+        if (next.source === "gps") { sessionStorage.setItem(KEY_GPS, JSON.stringify(next)); sessionStorage.removeItem(KEY_MANUAL); }
+        if (next.source === "manual") { sessionStorage.setItem(KEY_MANUAL, JSON.stringify(next)); }
+      } catch { /* storage unavailable — location simply won't persist for the session */ }
+    }
+    refresh(next.lat, next.lon);
+  }
+
+  async function labelGpsLocation(lat: number, lon: number): Promise<string> {
+    try {
+      const { label } = await reverseGeocode(lat, lon);
+      return label;
+    } catch {
+      // Geocoding failure must never block data — fall back to a generic, honest label.
+      return "Your location";
+    }
+  }
+
+  function requestGps() {
+    if (!navigator.geolocation) { setGeoNotice("Location is not supported by this browser. Search for a city instead."); setShowGeoBanner(false); return; }
+    setGeoBusy(true); setGeoNotice("");
+    try { sessionStorage.setItem(KEY_GEO_ASKED, "1"); } catch { /* ignore */ }
+    navigator.geolocation.getCurrentPosition(
+      async (position) => {
+        const lat = position.coords.latitude;
+        const lon = position.coords.longitude;
+        const label = await labelGpsLocation(lat, lon);
+        setGeoBusy(false); setShowGeoBanner(false);
+        applyLocation({ lat, lon, label, source: "gps" }, true);
+      },
+      (err) => {
+        setGeoBusy(false); setShowGeoBanner(false);
+        if (err.code === err.PERMISSION_DENIED) setGeoNotice("Location permission was declined. Showing the demo city — search for any place below.");
+        else if (err.code === err.TIMEOUT) setGeoNotice("Location request timed out. Showing the demo city — search for any place below.");
+        else setGeoNotice("Your position is currently unavailable. Showing the demo city — search for any place below.");
+      },
+      { enableHighAccuracy: false, timeout: 10000, maximumAge: 600000 },
+    );
+  }
+
+  function returnToGps() {
+    const saved = loadSession(KEY_GPS);
+    if (saved) { sessionStorage.removeItem(KEY_MANUAL); applyLocation({ ...saved, source: "gps" }, false); return; }
+    requestGps();
+  }
+
+  function selectSearchResult(item: LocationResult) {
+    const label = [item.name, item.region, item.country].filter(Boolean).join(", ");
+    setSearchText(""); setSearchResults([]); setSearchOpen(false); setGeoNotice("");
+    applyLocation({ lat: item.latitude, lon: item.longitude, label, source: "manual" }, true);
+  }
+
+  // Initial load: never block on location. Manual selection from earlier in the
+  // session wins; otherwise load the demo city immediately, then decide whether
+  // to offer geolocation (with an explanation) based on the permission state.
+  useEffect(() => {
+    const manual = loadSession(KEY_MANUAL);
+    if (manual) { setLoc({ ...manual, source: "manual" }); refresh(manual.lat, manual.lon); }
+    else { refresh(fallbackCity.lat, fallbackCity.lon); }
+
+    let asked = false;
+    try { asked = sessionStorage.getItem(KEY_GEO_ASKED) === "1"; } catch { /* ignore */ }
+    if (manual || asked) return;
+    if (!navigator.geolocation) return;
+    const permissions = (navigator as Navigator & { permissions?: { query: (d: { name: string }) => Promise<{ state: string }> } }).permissions;
+    if (permissions?.query) {
+      permissions.query({ name: "geolocation" }).then((status) => {
+        if (status.state === "granted") requestGps(); // previously allowed — no extra explanation needed
+        else if (status.state === "prompt") setShowGeoBanner(true); // explain first, then request on user action
+        // "denied" → stay on demo city with the search field; never re-prompt
+      }).catch(() => setShowGeoBanner(true));
+    } else {
+      setShowGeoBanner(true);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Debounced global city search
+  useEffect(() => {
+    const q = searchText.trim();
+    if (q.length < 2) { setSearchResults([]); setSearchOpen(false); return; }
+    setSearchBusy(true);
+    const t = setTimeout(async () => {
+      try { const results = await searchLocations(q); setSearchResults(results); setSearchOpen(true); }
+      catch { setSearchResults([]); setSearchOpen(false); }
+      finally { setSearchBusy(false); }
+    }, 300);
+    return () => clearTimeout(t);
+  }, [searchText]);
+
+  // Close search dropdown on outside click
+  useEffect(() => {
+    function onClick(e: MouseEvent) {
+      if (searchBoxRef.current && !searchBoxRef.current.contains(e.target as Node)) setSearchOpen(false);
+    }
+    document.addEventListener("mousedown", onClick);
+    return () => document.removeEventListener("mousedown", onClick);
+  }, []);
+
   const chartData = useMemo(() => air?.hourly.map((item) => ({ ...item, hour: new Date(item.time).toLocaleTimeString([], { hour: "numeric" }) })) || [], [air]);
 
-  function useMyLocation() {
-    if (!navigator.geolocation) { setError("Location is not supported by this browser."); return; }
-    navigator.geolocation.getCurrentPosition((position) => {
-      const next = { lat: position.coords.latitude, lon: position.coords.longitude };
-      setCoords(next); setCity("Your location"); refresh(next.lat, next.lon);
-    }, () => setError("Location permission was not granted. Showing the selected city instead."));
-  }
-  function selectCity(value: string) {
-    const cities: Record<string, { name: string; lat: number; lon: number }> = {
-      Hyderabad: fallbackCity, Delhi: { name: "Delhi", lat: 28.6139, lon: 77.209 },
-      Mumbai: { name: "Mumbai", lat: 19.076, lon: 72.8777 }, Bengaluru: { name: "Bengaluru", lat: 12.9716, lon: 77.5946 },
-      Chennai: { name: "Chennai", lat: 13.0827, lon: 80.2707 }, Pune: { name: "Pune", lat: 18.5204, lon: 73.8567 }
-    };
-    if (value === "Your location") return;
-    const item = cities[value]; if (!item) return; setCity(item.name); setCoords({ lat: item.lat, lon: item.lon }); refresh(item.lat, item.lon);
-  }
   async function submit(q = question) {
     if (!q.trim() || !air) return;
     setThinking(true); setAnswer("");
-    try { const result = await askAssistant(q, profile, coords); setAnswer(result.answer); setMode(result.mode); setDecision(result.decision || null); }
+    try { const result = await askAssistant(q, profile, { lat: loc.lat, lon: loc.lon }); setAnswer(result.answer); setMode(result.mode); setDecision(result.decision || null); }
     catch (e) { setAnswer(e instanceof Error ? e.message : "Assistant unavailable."); }
     finally { setThinking(false); setQuestion(""); }
   }
@@ -60,11 +177,44 @@ function App() {
       <a className="nav active"><Activity size={17}/> Overview</a>
       <a className="nav"><MessageCircle size={17}/> AI Assistant <span className="nav-dot"/></a>
       <a className="nav"><Compass size={17}/> Explore areas</a>
-      <div className="sidebar-bottom"><div className="privacy"><ShieldCheck size={16}/><div><b>Privacy first</b><small>Location is used only to fetch local air data.</small></div></div><small className="version">AIRSENSE AI · HACKATHON EDITION</small></div>
+      <div className="sidebar-bottom"><div className="privacy"><ShieldCheck size={16}/><div><b>Privacy first</b><small>Location is used only to fetch local air data. Coordinates stay in this session and are never sent to the AI model.</small></div></div><small className="version">AIRSENSE AI · HACKATHON EDITION</small></div>
     </aside>
     <main className="main">
-      <header className="topbar"><div><div className="eyebrow">WEDNESDAY, NOVEMBER 25, 2026</div><h1>Your air, decoded.</h1></div><div className="top-actions"><button className="outline-btn" onClick={useMyLocation}><Crosshair size={15}/> Use my location</button><button className="icon-btn" aria-label="Refresh air quality" onClick={() => refresh()}><RefreshCw size={17}/></button><div className="avatar">A</div></div></header>
-      <section className="location-row"><div className="location-title"><MapPin size={16}/><select value={city} onChange={(e) => selectCity(e.target.value)} aria-label="Select city"><option>Hyderabad</option><option>Delhi</option><option>Mumbai</option><option>Bengaluru</option><option>Chennai</option><option>Pune</option><option>Your location</option></select><span className="live-pill"><i/> LIVE DATA</span></div><span className="muted">{air?.observedAt ? `Updated ${new Date(air.observedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : "Waiting for data"}</span></section>
+      <header className="topbar"><div><div className="eyebrow">WEDNESDAY, NOVEMBER 25, 2026</div><h1>Your air, decoded.</h1></div><div className="top-actions"><button className="outline-btn" onClick={returnToGps} disabled={geoBusy}><Crosshair size={15}/> {loc.source === "manual" ? "Back to my location" : "Use my location"}</button><button className="icon-btn" aria-label="Refresh air quality" onClick={() => refresh()}><RefreshCw size={17}/></button><div className="avatar">A</div></div></header>
+
+      {showGeoBanner && <div className="geo-banner" role="dialog" aria-label="Location permission">
+        <MapPin size={16}/>
+        <div className="geo-banner-text"><b>Use your location?</b><span>AirSense shows air quality for the place you are in. Your coordinates are used only to fetch local data, stay in this browser session, and are never sent to the AI assistant.</span></div>
+        <button className="geo-allow" onClick={requestGps} disabled={geoBusy}>{geoBusy ? "Locating…" : "Allow location"}</button>
+        <button className="geo-dismiss" aria-label="Dismiss" onClick={() => { setShowGeoBanner(false); setGeoNotice("No problem — showing the demo city. Search for any place below."); try { sessionStorage.setItem(KEY_GEO_ASKED, "1"); } catch { /* ignore */ } }}><X size={14}/></button>
+      </div>}
+
+      <section className="location-row">
+        <div className="location-title">
+          <MapPin size={16}/>
+          <span className="location-name">{loc.label}</span>
+          <span className={`source-badge ${loc.source}`}>{loc.source === "gps" ? "GPS" : loc.source === "manual" ? "SELECTED" : "DEMO CITY"}</span>
+          <span className="live-pill"><i/> LIVE DATA</span>
+          {loc.source === "manual" && <button className="return-gps" onClick={returnToGps} disabled={geoBusy}><Crosshair size={12}/> Back to my location</button>}
+        </div>
+        <span className="muted">{air?.observedAt ? `Updated ${new Date(air.observedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : "Waiting for data"}</span>
+      </section>
+
+      <div className="search-row" ref={searchBoxRef}>
+        <div className="search-box">
+          <Search size={14}/>
+          <input value={searchText} onChange={(e) => setSearchText(e.target.value)} placeholder="Search any city or place worldwide…" aria-label="Search location"/>
+          {searchBusy && <RefreshCw className="spin" size={13}/>}
+        </div>
+        {searchOpen && searchResults.length > 0 && <div className="search-results" role="listbox">
+          {searchResults.map((r, i) => <button key={`${r.latitude}-${r.longitude}-${i}`} role="option" onClick={() => selectSearchResult(r)}>
+            <b>{r.name}</b><span>{[r.region, r.country].filter(Boolean).join(", ")}</span>
+          </button>)}
+        </div>}
+        {searchOpen && !searchBusy && searchResults.length === 0 && <div className="search-results"><div className="search-empty">No places found. Try a different spelling.</div></div>}
+      </div>
+
+      {geoNotice && <div className="notice-banner" role="status">{geoNotice}</div>}
       {error && <div className="error-banner" role="alert">{error}</div>}
       <section className="hero-grid">
         <div className={`aqi-card ${tone}`}>

@@ -1,4 +1,4 @@
-import type { AirData, AssistantResponse, Profile } from "./types";
+import type { AirData, AssistantResponse, LocationResult, Profile } from "./types";
 
 export async function getAirQuality(lat: number, lon: number): Promise<AirData> {
   const response = await fetch(`/api/air-quality?lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}`);
@@ -16,4 +16,18 @@ export async function askAssistant(question: string, profile: Profile, coords: {
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || "Assistant request failed.");
   return data as AssistantResponse;
+}
+
+export async function searchLocations(query: string): Promise<LocationResult[]> {
+  const response = await fetch(`/api/geocode?q=${encodeURIComponent(query)}`);
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || "Location search failed.");
+  return data.results as LocationResult[];
+}
+
+export async function reverseGeocode(lat: number, lon: number): Promise<{ label: string }> {
+  const response = await fetch(`/api/reverse-geocode?lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}`);
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || "Reverse geocoding failed.");
+  return data as { label: string };
 }

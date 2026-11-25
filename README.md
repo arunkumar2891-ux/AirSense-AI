@@ -25,8 +25,19 @@ People often see an AQI number but do not know what it means for their planned a
 - CAMS-based air-quality model estimates
 - Rule-based decision engine; optional Gemini/Groq adapter
 
+## Location & privacy
+
+The dashboard is location-first:
+
+- On first visit the app explains why location helps, then asks for browser geolocation permission. It never blocks the dashboard while waiting — the demo city loads immediately.
+- Granted permission loads air quality and weather for your coordinates and reverse-geocodes them to a friendly place name (city, region, country) via `/api/reverse-geocode`.
+- You can search any city worldwide (`/api/geocode`, backed by Open-Meteo's geocoding API). A manually selected location takes precedence over GPS for the rest of the session, and a "Back to my location" action returns to GPS at any time.
+- Permission is never re-requested: once denied or dismissed, the app stays on the fallback city with the search field, marked with a `DEMO CITY` badge so GPS, selected, and demo locations are always clearly distinguished.
+- Precise coordinates are never sent to Gemini (locked in by a test) and never persisted beyond session storage; only the chosen location label and coordinates are kept for the session.
+- Denial, timeout, unavailable position, and geocoding failures all degrade gracefully with a visible notice — the app never fabricates a location or an environmental reading.
+
 ## How it works
-1. The browser selects a preset city or requests geolocation permission.
+1. The browser resolves a location: GPS geolocation (after an explained permission request), a searched city, or the demo fallback.
 2. The backend fetches air-quality and weather data from Open-Meteo and caches responses for 10 minutes.
 3. The UI displays the reported AQI, pollutant levels and available hourly forecast.
 4. The assistant combines the supplied readings with the user's activity and sensitivity profile.

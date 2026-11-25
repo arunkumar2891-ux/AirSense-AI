@@ -9,14 +9,34 @@ const REAL_FETCH = globalThis.fetch;
 
 // Track Open-Meteo calls made by the app (which go through global fetch).
 let upstreamCalls = [];
+let failGeocoding = false;
 
-// Wrap global fetch: real fetch for localhost, mock for upstream Open-Meteo.
+// Wrap global fetch: real fetch for localhost, mock for upstream services.
 globalThis.fetch = async (url, options) => {
   const u = String(url);
   if (u.includes("127.0.0.1") || u.includes("localhost")) {
     return REAL_FETCH(url, options);
   }
   upstreamCalls.push(u);
+  if (u.includes("geocoding-api.open-meteo.com")) {
+    if (failGeocoding) return { ok: false, status: 503, json: async () => ({}) };
+    return {
+      ok: true,
+      json: async () => ({
+        results: [
+          { name: "Hyderabad", latitude: 17.38405, longitude: 78.45636, admin1: "Telangana", country: "India", country_code: "IN" },
+          { name: "Hyderabad", latitude: 25.3966, longitude: 68.3578, admin1: "Sindh", country: "Pakistan", country_code: "PK" },
+        ],
+      }),
+    };
+  }
+  if (u.includes("bigdatacloud.net")) {
+    if (failGeocoding) return { ok: false, status: 503, json: async () => ({}) };
+    return {
+      ok: true,
+      json: async () => ({ city: "Hyderabad", principalSubdivision: "Telangana", countryName: "India" }),
+    };
+  }
   if (u.includes("air-quality-api.open-meteo.com")) {
     return {
       ok: true,
@@ -59,6 +79,7 @@ function request(appInstance, { method = "GET", url, body, headers = {} }) {
 
 test.beforeEach(() => {
   upstreamCalls = [];
+  failGeocoding = false;
   rateBuckets.clear();
 });
 
@@ -123,6 +144,52 @@ test("air-quality endpoint returns consistent JSON error on bad coords", async (
   const res = await request(app, { method: "GET", url: "/api/air-quality?lat=999&lon=77" });
   assert.equal(res.status, 400);
   assert.match(res.body.error, /latitude and longitude/i);
+});
+
+test("geocode rejects too-short query", async () => {
+  const res = await request(app, { method: "GET", url: "/api/geocode?q=h" });
+  assert.equal(res.status, 400);
+  assert.match(res.body.error, /place name/i);
+});
+
+test("geocode returns friendly results", async () => {
+  const res = await request(app, { method: "GET", url: "/api/geocode?q=hyderabad" });
+  assert.equal(res.status, 200);
+  assert.ok(Array.isArray(res.body.results));
+  assert.equal(res.body.results.length, 2);
+  assert.equal(res.body.results[0].name, "Hyderabad");
+  assert.equal(res.body.results[0].region, "Telangana");
+  assert.equal(res.body.results[0].country, "India");
+  assert.ok(Number.isFinite(res.body.results[0].latitude));
+});
+
+test("geocode upstream failure returns 502/504 without internals", async () => {
+  failGeocoding = true;
+  const res = await request(app, { method: "GET", url: "/api/geocode?q=zzzz-unstable-place" });
+  assert.ok([502, 504].includes(res.status));
+  assert.match(res.body.error, /temporarily unavailable/i);
+  assert.ok(!("detail" in res.body), "no internal detail leaked");
+});
+
+test("reverse-geocode rejects invalid coordinates", async () => {
+  const res = await request(app, { method: "GET", url: "/api/reverse-geocode?lat=200&lon=0" });
+  assert.equal(res.status, 400);
+  assert.match(res.body.error, /latitude and longitude/i);
+});
+
+test("reverse-geocode returns a friendly label", async () => {
+  const res = await request(app, { method: "GET", url: "/api/reverse-geocode?lat=17.385&lon=78.4867" });
+  assert.equal(res.status, 200);
+  assert.equal(res.body.label, "Hyderabad, Telangana, India");
+  assert.equal(res.body.country, "India");
+});
+
+test("reverse-geocode upstream failure returns 502/504 without internals", async () => {
+  failGeocoding = true;
+  const res = await request(app, { method: "GET", url: "/api/reverse-geocode?lat=1.23&lon=4.56" });
+  assert.ok([502, 504].includes(res.status));
+  assert.match(res.body.error, /temporarily unavailable/i);
+  assert.ok(!("detail" in res.body), "no internal detail leaked");
 });
 
 test("rate limit returns 429 after configured max", async () => {

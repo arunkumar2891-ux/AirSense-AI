@@ -5,6 +5,7 @@ process.env.NODE_ENV = "test";
 
 let mockBehavior = { type: "success" };
 let mockCalls = [];
+let lastPrompt = "";
 
 const VALID_STRUCTURED = {
   summary: "US AQI is 172 (Unhealthy for sensitive groups).",
@@ -18,8 +19,9 @@ const VALID_STRUCTURED = {
 };
 
 class FakeModels {
-  async generateContent() {
+  async generateContent(args) {
     mockCalls.push(1);
+    lastPrompt = JSON.stringify(args);
     const b = mockBehavior.type;
     if (b === "success" || (b === "failThenSuccess" && mockCalls.length > 1)) {
       return { text: JSON.stringify(VALID_STRUCTURED) };
@@ -42,6 +44,7 @@ AI_CONFIG.apiKey = "test-key-SECRET-12345";
 
 const trusted = {
   aqi: 172, aqiScale: "US AQI",
+  location: { latitude: 17.385, longitude: 78.4867, timezone: "Asia/Kolkata" },
   pollutants: { pm25: 55.4, pm10: 88.1, ozone: 40.2, nitrogenDioxide: 21, carbonMonoxide: 300, sulphurDioxide: 5.1 },
   weather: { temperature_2m: 28 }, observedAt: "2026-11-25T15:00", source: "Open-Meteo / CAMS",
 };
@@ -120,6 +123,15 @@ test("deterministic fallback preserves baseline guidance text", async () => {
   assert.equal(result.answer, context.answer);
   assert.ok(result.note);
   assert.match(result.note, /safety guidance engine/i);
+});
+
+test("Gemini prompt never contains precise coordinates", async () => {
+  mockBehavior = { type: "success" };
+  await askGemini("Can I run?", context, trusted);
+  assert.ok(!lastPrompt.includes("78.4867"), "longitude must not reach Gemini");
+  assert.ok(!lastPrompt.includes("17.385"), "latitude must not reach Gemini");
+  assert.ok(!lastPrompt.includes("longitude"), "no location keys in prompt");
+  assert.ok(!lastPrompt.includes("latitude"), "no location keys in prompt");
 });
 
 test("Gemini contradicting deterministic decision is overridden", async () => {

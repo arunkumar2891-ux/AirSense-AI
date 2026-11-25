@@ -219,6 +219,53 @@ function isTimeoutError(err) {
 // ---------- Routes ----------
 app.get("/api/health", (_req, res) => res.json({ ok: true, service: "airsense-ai", timestamp: new Date().toISOString() }));
 
+// City search (forward geocoding via Open-Meteo). Cached — place names change rarely.
+app.get("/api/geocode", async (req, res) => {
+  const q = typeof req.query.q === "string" ? req.query.q.trim().replace(/[\x00-\x1f]/g, "") : "";
+  if (q.length < 2 || q.length > 100) {
+    return res.status(400).json({ error: "Enter a place name between 2 and 100 characters." });
+  }
+  try {
+    const url = `https://geocoding-api.open-meteo.com/v1/search?${new URLSearchParams({ name: q, count: "6", language: "en", format: "json" })}`;
+    const data = await cachedFetch(url, 24 * 60 * 60 * 1000);
+    const results = (Array.isArray(data?.results) ? data.results : []).map((r) => ({
+      name: String(r.name || ""),
+      region: r.admin1 ? String(r.admin1) : "",
+      country: r.country ? String(r.country) : "",
+      latitude: Number(r.latitude),
+      longitude: Number(r.longitude),
+    })).filter((r) => r.name && Number.isFinite(r.latitude) && Number.isFinite(r.longitude));
+    return res.json({ results });
+  } catch (error) {
+    const code = isTimeoutError(error) ? 504 : 502;
+    return res.status(code).json({ error: "Location search is temporarily unavailable." });
+  }
+});
+
+// Reverse geocode coordinates to a friendly label (BigDataCloud, no key required).
+app.get("/api/reverse-geocode", async (req, res) => {
+  const coords = validateCoordinates(req.query.lat, req.query.lon);
+  if (!coords) {
+    return res.status(400).json({ error: "Valid latitude and longitude are required." });
+  }
+  try {
+    const url = `https://api.bigdatacloud.net/data/reverse-geocode-client?${new URLSearchParams({
+      latitude: String(coords.latitude), longitude: String(coords.longitude), localityLanguage: "en",
+    })}`;
+    const data = await cachedFetch(url, 24 * 60 * 60 * 1000);
+    if (!data || typeof data !== "object") throw new Error("Invalid geocoder response");
+    const city = data.city || data.locality || "";
+    const region = data.principalSubdivision || "";
+    const country = data.countryName || "";
+    const label = [city, region, country].filter(Boolean).join(", ");
+    if (!label) throw new Error("Geocoder returned no place name");
+    return res.json({ label, city, region, country });
+  } catch (error) {
+    const code = isTimeoutError(error) ? 504 : 502;
+    return res.status(code).json({ error: "Reverse geocoding is temporarily unavailable." });
+  }
+});
+
 app.get("/api/air-quality", async (req, res) => {
   const coords = validateCoordinates(req.query.lat, req.query.lon);
   if (!coords) {

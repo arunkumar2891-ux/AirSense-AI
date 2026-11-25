@@ -18,6 +18,14 @@ export type AirData = {
 };
 export type Profile = { activity: string; ageGroup: string; sensitivity: string };
 
+export type LocationResult = {
+  name: string;
+  region: string;
+  country: string;
+  latitude: number;
+  longitude: number;
+};
+
 export type ExposureDecision = {
   overallRisk: "low" | "moderate" | "high" | "very_high" | "unknown";
   activityRecommendation: "suitable" | "caution" | "avoid" | "insufficient_data";
