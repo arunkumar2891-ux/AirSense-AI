@@ -40,6 +40,32 @@ People often see an AQI number but do not know what it means for their planned a
 - Guidance is informational and not medical advice. Follow local public-health authorities.
 - Alerts, saved profiles, multi-stop route exposure and long-term personal exposure tracking are future enhancements.
 
+## Decision-making methodology
+
+AirSense uses a deterministic exposure intelligence engine (`server/logic.js`) before any LLM involvement. The engine combines:
+
+| Factor | How it contributes |
+|---|---|
+| US AQI (EPA bands) | Primary risk driver (level 1–6) |
+| PM2.5 concentration | Independent contribution — can elevate risk beyond AQI alone (WHO/EPA breakpoints) |
+| Activity intensity | Vigorous (running, cycling, outdoor workout, sports) adds risk; prolonged (commuting) adds less |
+| Vulnerability | Children, older adults, and respiratory/heart-lung sensitivity each add risk |
+| Wind speed | Low wind (<5 km/h) adds stagnation risk |
+| Forecast trend | Rising AQI forecast adds risk; falling trend is noted but does not lower current risk |
+| Data freshness | Stale (>3h) or missing readings return `insufficient_data` instead of a decision |
+
+The engine produces a structured decision: `overallRisk`, `activityRecommendation`, `recommendedAction`, `reasoning`, `sensitiveGroupAdvice`, `alternativeActivity`, `dataFreshness`, and `limitations`.
+
+When Gemini is configured, it receives this decision as an authoritative baseline and is instructed to explain it without contradicting it. A contradiction-detection layer checks the AI response against the deterministic recommendation; if the AI disagrees (e.g., says "safe" when the rules say "avoid"), the deterministic result is used and the discrepancy is logged.
+
+### Decision limitations
+
+- Air quality data are modelled estimates from CAMS via Open-Meteo, not regulatory station readings.
+- The engine does not make medical diagnoses or claim health outcomes.
+- It never recommends ignoring official public-health advisories — limitations text always references them.
+- It never invents a better time or forecast without forecast evidence from the provider.
+- PM2.5 independent assessment uses 24-hour breakpoints, not real-time sub-hourly thresholds.
+
 ## Run locally
 Requirements: Node.js 20+ and npm.
 

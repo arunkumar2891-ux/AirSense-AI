@@ -25,6 +25,7 @@ class FakeModels {
       return { text: JSON.stringify(VALID_STRUCTURED) };
     }
     if (b === "invalid") return { text: "not json at all" };
+    if (b === "contradiction") return { text: JSON.stringify({ ...VALID_STRUCTURED, recommendedAction: "Conditions are safe and favorable for a run.", activityAdvice: "Enjoy your outdoor run." }) };
     if (b === "timeout") { const e = new Error("Request timed out"); e.name = "TimeoutError"; throw e; }
     if (b === "rateLimit") { const e = new Error("429 Too Many Requests"); e.status = 429; throw e; }
     if (b === "failThenSuccess") { const e = new Error("503 Service Unavailable"); e.status = 503; throw e; }
@@ -119,4 +120,21 @@ test("deterministic fallback preserves baseline guidance text", async () => {
   assert.equal(result.answer, context.answer);
   assert.ok(result.note);
   assert.match(result.note, /safety guidance engine/i);
+});
+
+test("Gemini contradicting deterministic decision is overridden", async () => {
+  mockBehavior = { type: "contradiction" };
+  const decision = {
+    overallRisk: "high", activityRecommendation: "avoid",
+    recommendedAction: "Avoid outdoor running.",
+    reasoning: "US AQI 172 is Unhealthy for sensitive groups.",
+    sensitiveGroupAdvice: "Avoid.", alternativeActivity: "Indoor gym.",
+    dataFreshness: { state: "fresh", ageMs: 300000, label: "fresh" },
+    limitations: "Model data.",
+  };
+  const result = await askGemini("Can I run?", context, trusted, decision);
+  // AI said "safe" but rules say "avoid" → contradiction detected, structured nulled
+  assert.equal(result.structured, null);
+  assert.match(result.answer, /adjusted to align/i);
+  assert.deepEqual(result.decision, decision);
 });

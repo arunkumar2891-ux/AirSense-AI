@@ -1,4 +1,4 @@
-import type { AirData, Profile } from "./types";
+import type { AirData, AssistantResponse, Profile } from "./types";
 
 export async function getAirQuality(lat: number, lon: number): Promise<AirData> {
   const response = await fetch(`/api/air-quality?lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}`);
@@ -15,5 +15,5 @@ export async function askAssistant(question: string, profile: Profile, coords: {
   });
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || "Assistant request failed.");
-  return data as { answer: string; mode: string };
+  return data as AssistantResponse;
 }

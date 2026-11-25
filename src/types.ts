@@ -17,3 +17,22 @@ export type AirData = {
   attribution: string;
 };
 export type Profile = { activity: string; ageGroup: string; sensitivity: string };
+
+export type ExposureDecision = {
+  overallRisk: "low" | "moderate" | "high" | "very_high" | "unknown";
+  activityRecommendation: "suitable" | "caution" | "avoid" | "insufficient_data";
+  recommendedAction: string;
+  reasoning: string;
+  sensitiveGroupAdvice: string;
+  alternativeActivity: string;
+  dataFreshness: { state: string; ageMs: number | null; label: string };
+  limitations: string;
+};
+
+export type AssistantResponse = {
+  answer: string;
+  mode: string;
+  decision?: ExposureDecision;
+  structured?: Record<string, string>;
+  note?: string;
+};

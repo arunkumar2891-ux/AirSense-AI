@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Activity, ArrowUpRight, Bot, Cloud, Compass, Crosshair, HeartPulse, Leaf, MapPin, MessageCircle, RefreshCw, Send, ShieldCheck, Wind } from "lucide-react";
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { askAssistant, getAirQuality } from "./api";
-import type { AirData, Profile } from "./types";
+import type { AirData, ExposureDecision, Profile } from "./types";
 
 const fallbackCity = { name: "Hyderabad", lat: 17.385, lon: 78.4867 };
 const prompts = ["Is it safe to go for a run?", "What precautions should my family take?", "Explain today's pollution levels"];
@@ -17,6 +17,7 @@ function App() {
   const [answer, setAnswer] = useState("");
   const [thinking, setThinking] = useState(false);
   const [mode, setMode] = useState("");
+  const [decision, setDecision] = useState<ExposureDecision | null>(null);
 
   async function refresh(lat = coords.lat, lon = coords.lon) {
     setLoading(true); setError("");
@@ -46,7 +47,7 @@ function App() {
   async function submit(q = question) {
     if (!q.trim() || !air) return;
     setThinking(true); setAnswer("");
-    try { const result = await askAssistant(q, profile, coords); setAnswer(result.answer); setMode(result.mode); }
+    try { const result = await askAssistant(q, profile, coords); setAnswer(result.answer); setMode(result.mode); setDecision(result.decision || null); }
     catch (e) { setAnswer(e instanceof Error ? e.message : "Assistant unavailable."); }
     finally { setThinking(false); setQuestion(""); }
   }
@@ -90,8 +91,20 @@ function App() {
       </section>
       <section className="section-block assistant-section"><div className="section-header"><div><span className="section-kicker">YOUR PERSONAL AIR GUIDE</span><h2>Ask AirSense AI</h2><p className="muted">Grounded in local readings and your activity context.</p></div><div className="ai-mark"><Bot size={20}/> AI POWERED</div></div>
         <div className="assistant-card">
-          <div className="profile-row"><div className="profile-heading"><HeartPulse size={17}/><b>Personalize your guidance</b></div><div className="profile-controls"><label>Activity<select value={profile.activity} onChange={e => setProfile({...profile, activity:e.target.value})}><option value="running">Running</option><option value="cycling">Cycling</option><option value="outdoor workout">Outdoor workout</option><option value="sports">Sports</option><option value="commuting">Commuting</option><option value="daily activities">Daily activities</option></select></label><label>Profile<select value={profile.ageGroup} onChange={e => setProfile({...profile, ageGroup:e.target.value})}><option value="adult">Adult</option><option value="child">Child</option><option value="older adult">Older adult</option></select></label><label>Sensitivity<select value={profile.sensitivity} onChange={e => setProfile({...profile, sensitivity:e.target.value})}><option value="general">General</option><option value="respiratory sensitivity">Respiratory sensitivity</option><option value="heart or lung condition">Heart/lung condition</option></select></label></div></div>
+          <div className="profile-row"><div className="profile-heading"><HeartPulse size={17}/><b>Personalize your guidance</b></div><div className="profile-controls"><label>Activity<select value={profile.activity} onChange={e => setProfile({...profile, activity:e.target.value})}><option value="running">Running</option><option value="cycling">Cycling</option><option value="outdoor workout">Outdoor workout</option><option value="sports">Sports</option><option value="commuting">Commuting</option><option value="daily activities">Daily activities</option><option value="children's outdoor play">Children's outdoor play</option></select></label><label>Profile<select value={profile.ageGroup} onChange={e => setProfile({...profile, ageGroup:e.target.value})}><option value="adult">Adult</option><option value="child">Child</option><option value="older adult">Older adult</option></select></label><label>Sensitivity<select value={profile.sensitivity} onChange={e => setProfile({...profile, sensitivity:e.target.value})}><option value="general">General</option><option value="respiratory sensitivity">Respiratory sensitivity</option><option value="heart or lung condition">Heart/lung condition</option></select></label></div></div>
           <div className="prompt-list">{prompts.map(p => <button key={p} onClick={() => submit(p)}>{p}<ArrowUpRight size={13}/></button>)}</div>
+          {decision && <div className="decision-card">
+            <div className="decision-top">
+              <span className={`risk-pill ${decision.overallRisk}`}>{decision.overallRisk.replace("_", " ").toUpperCase()}</span>
+              <span className={`rec-pill ${decision.activityRecommendation}`}>{decision.activityRecommendation.replace("_", " ").toUpperCase()}</span>
+              <span className="muted" style={{fontSize: "0.75rem"}}>{decision.dataFreshness.label}</span>
+            </div>
+            <p className="decision-action">{decision.recommendedAction}</p>
+            <p className="decision-reasoning">{decision.reasoning}</p>
+            {decision.sensitiveGroupAdvice !== "No additional sensitivity concerns for this profile." && <p className="decision-sensitive">{decision.sensitiveGroupAdvice}</p>}
+            {decision.activityRecommendation !== "suitable" && <p className="decision-alt"><b>Alternative:</b> {decision.alternativeActivity}</p>}
+            <p className="decision-limitations">{decision.limitations}</p>
+          </div>}
           {answer && <div className="answer-box"><div className="answer-title"><Bot size={16}/> AirSense says <span>{mode === "ai" ? "GENERATIVE AI" : "SAFETY ENGINE"}</span></div><p>{answer}</p></div>}
           <form className="chat-input" onSubmit={e => {e.preventDefault(); submit();}}><input value={question} onChange={e => setQuestion(e.target.value)} placeholder="Ask about your air quality, activities or precautions…" aria-label="Ask AirSense AI"/><button disabled={thinking || !air} aria-label="Send question">{thinking ? <RefreshCw className="spin" size={17}/> : <Send size={17}/>}</button></form>
           <div className="disclaimer">Guidance is informational, not medical advice. Follow local public-health advisories.</div>

@@ -4,7 +4,7 @@ import dotenv from "dotenv";
 import helmet from "helmet";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { getAQIStatus, buildRecommendationContext } from "./logic.js";
+import { getAQIStatus, buildRecommendationContext, buildExposureDecision } from "./logic.js";
 import { askGemini } from "./gemini.js";
 
 dotenv.config();
@@ -125,7 +125,7 @@ async function fetchTrustedEnvironmentalData(latitude, longitude) {
 }
 
 // ---------- Input validation ----------
-const ALLOWED_ACTIVITIES = new Set(["running", "cycling", "outdoor workout", "sports", "commuting", "daily activities"]);
+const ALLOWED_ACTIVITIES = new Set(["running", "cycling", "outdoor workout", "sports", "commuting", "daily activities", "children's outdoor play"]);
 const ALLOWED_AGE_GROUPS = new Set(["adult", "child", "older adult"]);
 const ALLOWED_SENSITIVITIES = new Set(["general", "respiratory sensitivity", "heart or lung condition"]);
 
@@ -252,10 +252,12 @@ app.post("/api/assistant", assistantRateLimiter, async (req, res) => {
   }
 
   const context = buildRecommendationContext(trusted, profile, question);
-  const result = await askGemini(question, context, trusted);
+  const decision = buildExposureDecision(trusted, profile);
+  const result = await askGemini(question, context, trusted, decision);
   return res.json({
     answer: result.answer,
     mode: result.mode,
+    decision,
     ...(result.structured ? { structured: result.structured } : {}),
     ...(result.note ? { note: result.note } : {}),
     context,

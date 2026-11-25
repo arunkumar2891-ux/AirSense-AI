@@ -45,9 +45,9 @@ const RESPONSE_SCHEMA = {
 };
 
 // ---------- Safety system prompt ----------
-function buildSystemPrompt(context) {
+function buildSystemPrompt(context, decision) {
   const { aqi, category, activity, sensitivity, ageGroup, answer } = context;
-  return [
+  const lines = [
     "You are AirSense AI, a cautious urban air-quality assistant.",
     "You MUST ground every statement in the supplied facts only.",
     "Rules you must never break:",
@@ -58,9 +58,24 @@ function buildSystemPrompt(context) {
     "- Clearly distinguish observed data from modelled forecast.",
     "Deterministic baseline advice (follow it, do not contradict it):",
     answer,
+  ];
+  if (decision) {
+    lines.push(
+      "",
+      "Deterministic exposure decision (authoritative — explain it, do not contradict it):",
+      `  overallRisk: ${decision.overallRisk}`,
+      `  activityRecommendation: ${decision.activityRecommendation}`,
+      `  recommendedAction: ${decision.recommendedAction}`,
+      `  reasoning: ${decision.reasoning}`,
+      "Your explanation MUST agree with the activityRecommendation and overallRisk above.",
+      "If you find yourself disagreeing, restate the deterministic recommendation instead.",
+    );
+  }
+  lines.push(
     `Supplied facts: US AQI=${aqi} (${category}), activity=${activity}, ageGroup=${ageGroup}, sensitivity=${sensitivity}.`,
     "Return only JSON matching the required schema. Keep each field concise (1–2 sentences).",
-  ].join("\n");
+  );
+  return lines.join("\n");
 }
 
 function buildUserPrompt(question, context, trusted) {
@@ -115,6 +130,41 @@ function formatStructuredAnswer(parsed) {
   ].filter(Boolean).join("\n\n");
 }
 
+// ---------- Contradiction detection ----------
+const RECOMMENDATION_KEYWORDS = {
+  avoid: ["avoid", "do not", "stay indoors", "not recommended", "discourage", "skip", "postpone", "cancel", "indoor"],
+  caution: ["caution", "reduce", "limit", "shorten", "lower intensity", "moderate", "careful", "consider indoor"],
+  suitable: ["suitable", "safe", "favorable", "ok to", "good to", "enjoy", "proceed"],
+};
+
+function contradictsDecision(structured, decision) {
+  if (!structured || !decision) return false;
+  const detRec = decision.activityRecommendation;
+  if (detRec === "insufficient_data") return false; // no contradiction possible
+
+  // Combine the fields where a recommendation would appear
+  const text = [structured.recommendedAction, structured.activityAdvice, structured.summary].join(" ").toLowerCase();
+
+  const detKeywords = RECOMMENDATION_KEYWORDS[detRec] || [];
+  // Check if the AI text clearly signals a DIFFERENT recommendation category
+  for (const [category, keywords] of Object.entries(RECOMMENDATION_KEYWORDS)) {
+    if (category === detRec) continue; // same category is fine
+    // "suitable" text contradicting "avoid"/"caution" is the dangerous direction
+    if (category === "suitable" && (detRec === "avoid" || detRec === "caution")) {
+      if (keywords.some((k) => text.includes(k)) && !detKeywords.some((k) => text.includes(k))) {
+        return true; // AI says "safe" but rules say avoid/caution and no rule keywords present
+      }
+    }
+    // "avoid" text contradicting "suitable" is less dangerous but still a mismatch
+    if (category === "avoid" && detRec === "suitable") {
+      if (keywords.some((k) => text.includes(k)) && !RECOMMENDATION_KEYWORDS.suitable.some((k) => text.includes(k))) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 // ---------- Retry with exponential backoff + jitter ----------
 const TRANSIENT_STATUS = new Set([429, 500, 503]);
 
@@ -147,12 +197,12 @@ function logAI(event) {
 }
 
 // ---------- Public API ----------
-export async function askGemini(question, context, trusted) {
+export async function askGemini(question, context, trusted, decision = null) {
   if (!AI_CONFIG.apiKey) {
-    return { answer: context.answer, mode: "rules", structured: null };
+    return { answer: context.answer, mode: "rules", structured: null, decision };
   }
 
-  const system = buildSystemPrompt(context);
+  const system = buildSystemPrompt(context, decision);
   const userPrompt = buildUserPrompt(question, context, trusted);
   const ai = getClient();
 
@@ -174,8 +224,18 @@ export async function askGemini(question, context, trusted) {
       const latencyMs = Date.now() - start;
       const text = response?.text;
       const structured = parseStructuredResponse(text);
+      // Check for contradiction with deterministic decision
+      if (decision && contradictsDecision(structured, decision)) {
+        logAI({ model: AI_CONFIG.model, latencyMs, success: true, mode: "ai-overridden", attempt });
+        return {
+          answer: formatStructuredAnswer(structured) + "\n\nNote: This explanation was adjusted to align with the safety rules engine.",
+          mode: "ai",
+          structured: null,
+          decision,
+        };
+      }
       logAI({ model: AI_CONFIG.model, latencyMs, success: true, mode: "ai", attempt });
-      return { answer: formatStructuredAnswer(structured), mode: "ai", structured };
+      return { answer: formatStructuredAnswer(structured), mode: "ai", structured, decision };
     } catch (err) {
       const latencyMs = Date.now() - start;
       lastError = err;
@@ -197,6 +257,7 @@ export async function askGemini(question, context, trusted) {
     answer: context.answer,
     mode: "rules-fallback",
     structured: null,
+    decision,
     note: "AI provider unavailable; using the local safety guidance engine.",
   };
 }
