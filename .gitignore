@@ -18,5 +18,4 @@ coverage/
 
 # Restored from skills-lock.json via: npx skills experimental_install -y
 .agents/skills/**
-!.agents/skills/brag/
-!.agents/skills/brag/**
+.agents/skills/brag/
