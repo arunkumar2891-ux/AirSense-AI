@@ -30,15 +30,15 @@ People often see an AQI number but do not know what it means for their planned a
 The dashboard is location-first:
 
 - On first visit the app explains why location helps, then asks for browser geolocation permission. It never blocks the dashboard while waiting — the demo city loads immediately.
-- Granted permission loads air quality and weather for your coordinates and reverse-geocodes them to a friendly place name (city, region, country) via `/api/reverse-geocode`.
+- Granted permission loads local air quality and weather and asks BigDataCloud's browser-only reverse-geocoding endpoint directly for a friendly place name (city, region, country). The server never sends coordinates to BigDataCloud.
 - You can search any city worldwide (`/api/geocode`, backed by Open-Meteo's geocoding API). A manually selected location takes precedence over GPS for the rest of the session, and a "Back to my location" action returns to GPS at any time.
 - Permission is never re-requested: once denied or dismissed, the app stays on the fallback city with the search field, marked with a `DEMO CITY` badge so GPS, selected, and demo locations are always clearly distinguished.
-- Precise coordinates are never sent to Gemini (locked in by a test) and never persisted beyond session storage; only the chosen location label and coordinates are kept for the session.
+- Precise coordinates are never sent to Gemini (locked in by a test) and never persisted beyond session storage. Environmental API coordinates are rounded to two decimal places (about 1 km) before server-side caching. For GPS naming only, the browser shares the current coordinates directly with BigDataCloud under its client-side endpoint terms; failure falls back honestly to “Your location.”
 - Denial, timeout, unavailable position, and geocoding failures all degrade gracefully with a visible notice — the app never fabricates a location or an environmental reading.
 
 ## How it works
 1. The browser resolves a location: GPS geolocation (after an explained permission request), a searched city, or the demo fallback.
-2. The backend fetches air-quality and weather data from Open-Meteo and caches responses for 10 minutes.
+2. The backend fetches air-quality and weather data from Open-Meteo and caches responses for 10 minutes in a bounded 500-entry LRU cache. Concurrent requests for the same rounded location share one upstream request.
 3. The UI displays the reported AQI, pollutant levels and the next available hourly forecast from the current local hour onward.
 4. The assistant combines the supplied readings with the user's activity and sensitivity profile.
 5. If configured, an LLM explains the supplied facts. If the provider is unavailable or not configured, the deterministic guidance engine responds.
@@ -130,6 +130,8 @@ npm run check
 
 The included `render.yaml` provides a Blueprint configuration. Render web services must bind to `0.0.0.0`; this app does so and uses Render's `PORT`.
 
+Production explicitly sets `NODE_ENV=production`, so CORS permits same-origin requests and configured `ALLOWED_ORIGINS` only. Default per-IP limits are 60 air-quality requests/minute, 30 location requests/minute, and 20 assistant requests/minute. Health checks are not rate-limited. These values and cache capacity/TTLs are configurable with the variables documented in `.env.example`.
+
 ## Repository compliance checklist
 - [ ] Public GitHub repository
 - [ ] Exactly one branch (`main`)
@@ -143,6 +145,8 @@ The included `render.yaml` provides a Blueprint configuration. Render web servic
 ## Data sources and attribution
 - Air quality: [Open-Meteo Air Quality API](https://open-meteo.com/en/docs/air-quality-api)
 - Weather: [Open-Meteo Forecast API](https://open-meteo.com/en/docs)
+- City search: [Open-Meteo Geocoding API](https://open-meteo.com/en/docs/geocoding-api) using GeoNames data
+- GPS place names: [BigDataCloud Client-side Reverse Geocoding](https://www.bigdatacloud.com/free-api/free-reverse-geocode-to-city-api), called directly by the browser with the current GPS coordinates; generic fallback if unavailable
 - Atmospheric model: Copernicus Atmosphere Monitoring Service (CAMS), as served by Open-Meteo.
 
 ## License

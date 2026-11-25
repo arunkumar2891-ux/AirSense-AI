@@ -7,16 +7,20 @@ import { fileURLToPath } from "node:url";
 import { getAQIStatus, buildRecommendationContext, buildExposureDecision } from "./logic.js";
 import { askGemini } from "./gemini.js";
 import { providerTimeToIso, selectCurrentAndFutureHours } from "./time.js";
+import { BoundedTTLCache, normalizeCoordinates } from "./cache.js";
+import { createRateLimiter } from "./rate-limit.js";
 
 dotenv.config();
 
+const IS_PRODUCTION = process.env.NODE_ENV === "production";
 const app = express();
 app.disable("x-powered-by");
-app.set("trust proxy", 1);
+// Only private/loopback deployment proxies may supply client-forwarding data.
+// Direct public clients cannot select their own rate-limit identity with XFF.
+app.set("trust proxy", IS_PRODUCTION ? "loopback, linklocal, uniquelocal" : false);
 
 const PORT = Number(process.env.PORT || 10000);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const IS_PRODUCTION = process.env.NODE_ENV === "production";
 
 // ---------- Security headers (Helmet) ----------
 app.use(helmet({
@@ -26,7 +30,7 @@ app.use(helmet({
       scriptSrc: ["'self'"],
       styleSrc: ["'self'", "'unsafe-inline'"],
       imgSrc: ["'self'", "data:", "https:"],
-      connectSrc: ["'self'"],
+      connectSrc: ["'self'", "https://api.bigdatacloud.net"],
       fontSrc: ["'self'"],
       objectSrc: ["'none'"],
       frameAncestors: ["'none'"],
@@ -42,33 +46,43 @@ app.use(helmet({
 const devOrigins = ["http://localhost:5173", "http://127.0.0.1:5173"];
 const extraOrigins = (process.env.ALLOWED_ORIGINS || "")
   .split(",").map((o) => o.trim()).filter(Boolean);
-const allowedOrigins = new Set([...devOrigins, ...extraOrigins]);
+const allowedOrigins = new Set(extraOrigins);
 
-app.use(cors({
-  origin: (origin, cb) => {
-    if (!origin) return cb(null, true); // same-origin / curl / server-to-server
-    if (allowedOrigins.has(origin)) return cb(null, true);
-    if (!IS_PRODUCTION) return cb(null, true); // permissive for local dev
-    return cb(new Error("CORS: origin not allowed"), false);
-  },
+function isOriginAllowed(origin, production = IS_PRODUCTION, requestOrigin = "") {
+  if (!origin) return true;
+  if (requestOrigin && origin === requestOrigin) return true;
+  if (allowedOrigins.has(origin)) return true;
+  if (!production && devOrigins.includes(origin)) return true;
+  return !production; // Keep arbitrary local dev ports/tools working.
+}
+
+app.use(cors((req, cb) => {
+  const origin = req.get("origin");
+  const requestOrigin = `${req.protocol}://${req.get("host")}`;
+  if (isOriginAllowed(origin, IS_PRODUCTION, requestOrigin)) {
+    return cb(null, { origin: true });
+  }
+  return cb(new Error("CORS: origin not allowed"));
 }));
 
 app.use(express.json({ limit: "30kb" }));
 
 // ---------- Upstream data cache (reused by air-quality + assistant) ----------
-const cache = new Map();
-async function cachedFetch(url, ttlMs = 10 * 60 * 1000) {
+const CACHE_MAX_ENTRIES = Math.max(10, Number(process.env.CACHE_MAX_ENTRIES) || 500);
+const ENVIRONMENT_CACHE_TTL_MS = Math.max(1000, Number(process.env.ENVIRONMENT_CACHE_TTL_MS) || 10 * 60 * 1000);
+const GEOCODE_CACHE_TTL_MS = Math.max(1000, Number(process.env.GEOCODE_CACHE_TTL_MS) || 24 * 60 * 60 * 1000);
+const cache = new BoundedTTLCache({ maxEntries: CACHE_MAX_ENTRIES });
+
+async function cachedFetch(url, ttlMs = ENVIRONMENT_CACHE_TTL_MS) {
   const key = String(url);
-  const hit = cache.get(key);
-  if (hit && Date.now() - hit.time < ttlMs) return hit.data;
-  const response = await fetch(key, {
-    headers: { "User-Agent": "AirSenseAI/1.0" },
-    signal: AbortSignal.timeout(10000),
+  return cache.getOrLoad(key, ttlMs, async () => {
+    const response = await fetch(key, {
+      headers: { "User-Agent": "AirSenseAI/1.0" },
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!response.ok) throw new Error(`Data provider returned ${response.status}`);
+    return response.json();
   });
-  if (!response.ok) throw new Error(`Data provider returned ${response.status}`);
-  const data = await response.json();
-  cache.set(key, { time: Date.now(), data });
-  return data;
 }
 
 // ---------- Trusted environmental data ----------
@@ -97,7 +111,8 @@ function finiteNonNegative(value) {
 }
 
 async function fetchTrustedEnvironmentalData(latitude, longitude) {
-  const { airUrl, weatherUrl } = buildAirUrls(latitude, longitude);
+  const normalized = normalizeCoordinates(latitude, longitude);
+  const { airUrl, weatherUrl } = buildAirUrls(normalized.latitude, normalized.longitude);
   const [air, weather] = await Promise.all([
     cachedFetch(airUrl),
     cachedFetch(weatherUrl),
@@ -117,7 +132,7 @@ async function fetchTrustedEnvironmentalData(latitude, longitude) {
     12,
   );
   return {
-    location: { latitude, longitude, timezone: air.timezone || "local" },
+    location: { ...normalized, timezone: air.timezone || "UTC" },
     observedAt,
     aqi,
     aqiScale: "US AQI",
@@ -186,40 +201,32 @@ function validateAssistantInput(body) {
   };
 }
 
-// ---------- Rate limiting (in-memory, per IP) ----------
+// ---------- Rate limiting (bounded, in-memory, per trusted client IP) ----------
 const RATE_LIMIT_WINDOW_MS = Math.max(1000, Number(process.env.ASSISTANT_RATE_LIMIT_WINDOW_MS) || 60000);
 const RATE_LIMIT_MAX = Math.max(1, Number(process.env.ASSISTANT_RATE_LIMIT_MAX) || 20);
-const rateBuckets = new Map(); // ip -> { count, resetAt }
-
-function assistantRateLimiter(req, res, next) {
-  const ip = req.ip || req.socket?.remoteAddress || "unknown";
-  const now = Date.now();
-  let bucket = rateBuckets.get(ip);
-  if (!bucket || now >= bucket.resetAt) {
-    bucket = { count: 0, resetAt: now + RATE_LIMIT_WINDOW_MS };
-    rateBuckets.get(ip)?.count; // no-op
-    rateBuckets.set(ip, bucket);
-  }
-  bucket.count += 1;
-  const remaining = Math.max(0, RATE_LIMIT_MAX - bucket.count);
-  res.set("RateLimit-Limit", String(RATE_LIMIT_MAX));
-  res.set("RateLimit-Remaining", String(remaining));
-  res.set("RateLimit-Reset", String(Math.ceil(bucket.resetAt / 1000)));
-  if (bucket.count > RATE_LIMIT_MAX) {
-    const retryAfterSec = Math.ceil((bucket.resetAt - now) / 1000);
-    res.set("Retry-After", String(retryAfterSec));
-    return res.status(429).json({
-      error: `Too many assistant requests. Limit is ${RATE_LIMIT_MAX} per ${Math.round(RATE_LIMIT_WINDOW_MS / 1000)}s. Retry in ${retryAfterSec}s.`,
-    });
-  }
-  // Opportunistic cleanup so the map does not grow unboundedly
-  if (rateBuckets.size > 5000) {
-    for (const [key, b] of rateBuckets) {
-      if (now >= b.resetAt) rateBuckets.delete(key);
-    }
-  }
-  next();
-}
+const rateLimiters = {
+  airQuality: createRateLimiter({
+    name: "air-quality",
+    windowMs: process.env.DATA_RATE_LIMIT_WINDOW_MS || 60000,
+    max: process.env.DATA_RATE_LIMIT_MAX || 60,
+  }),
+  geocode: createRateLimiter({
+    name: "location-search",
+    windowMs: process.env.GEOCODE_RATE_LIMIT_WINDOW_MS || 60000,
+    max: process.env.GEOCODE_RATE_LIMIT_MAX || 30,
+  }),
+  reverseGeocode: createRateLimiter({
+    name: "reverse-geocode",
+    windowMs: process.env.GEOCODE_RATE_LIMIT_WINDOW_MS || 60000,
+    max: process.env.GEOCODE_RATE_LIMIT_MAX || 30,
+  }),
+  assistant: createRateLimiter({
+    name: "assistant",
+    windowMs: RATE_LIMIT_WINDOW_MS,
+    max: RATE_LIMIT_MAX,
+  }),
+};
+const rateBuckets = rateLimiters.assistant.buckets;
 
 // ---------- Error helpers ----------
 function isTimeoutError(err) {
@@ -230,14 +237,14 @@ function isTimeoutError(err) {
 app.get("/api/health", (_req, res) => res.json({ ok: true, service: "airsense-ai", timestamp: new Date().toISOString() }));
 
 // City search (forward geocoding via Open-Meteo). Cached — place names change rarely.
-app.get("/api/geocode", async (req, res) => {
+app.get("/api/geocode", rateLimiters.geocode.middleware, async (req, res) => {
   const q = typeof req.query.q === "string" ? req.query.q.trim().replace(/[\x00-\x1f]/g, "") : "";
   if (q.length < 2 || q.length > 100) {
     return res.status(400).json({ error: "Enter a place name between 2 and 100 characters." });
   }
   try {
     const url = `https://geocoding-api.open-meteo.com/v1/search?${new URLSearchParams({ name: q, count: "6", language: "en", format: "json" })}`;
-    const data = await cachedFetch(url, 24 * 60 * 60 * 1000);
+    const data = await cachedFetch(url, GEOCODE_CACHE_TTL_MS);
     const results = (Array.isArray(data?.results) ? data.results : []).map((r) => ({
       name: String(r.name || ""),
       region: r.admin1 ? String(r.admin1) : "",
@@ -252,31 +259,14 @@ app.get("/api/geocode", async (req, res) => {
   }
 });
 
-// Reverse geocode coordinates to a friendly label (BigDataCloud, no key required).
-app.get("/api/reverse-geocode", async (req, res) => {
-  const coords = validateCoordinates(req.query.lat, req.query.lon);
-  if (!coords) {
-    return res.status(400).json({ error: "Valid latitude and longitude are required." });
-  }
-  try {
-    const url = `https://api.bigdatacloud.net/data/reverse-geocode-client?${new URLSearchParams({
-      latitude: String(coords.latitude), longitude: String(coords.longitude), localityLanguage: "en",
-    })}`;
-    const data = await cachedFetch(url, 24 * 60 * 60 * 1000);
-    if (!data || typeof data !== "object") throw new Error("Invalid geocoder response");
-    const city = data.city || data.locality || "";
-    const region = data.principalSubdivision || "";
-    const country = data.countryName || "";
-    const label = [city, region, country].filter(Boolean).join(", ");
-    if (!label) throw new Error("Geocoder returned no place name");
-    return res.json({ label, city, region, country });
-  } catch (error) {
-    const code = isTimeoutError(error) ? 504 : 502;
-    return res.status(code).json({ error: "Reverse geocoding is temporarily unavailable." });
-  }
+// Privacy-preserving fallback. Friendly GPS labels are resolved directly in
+// the browser using BigDataCloud's client-only endpoint; coordinates never
+// transit this server for reverse geocoding.
+app.get("/api/reverse-geocode", rateLimiters.reverseGeocode.middleware, (_req, res) => {
+  return res.json({ label: "Your location", fallback: true });
 });
 
-app.get("/api/air-quality", async (req, res) => {
+app.get("/api/air-quality", rateLimiters.airQuality.middleware, async (req, res) => {
   const coords = validateCoordinates(req.query.lat, req.query.lon);
   if (!coords) {
     return res.status(400).json({ error: "Valid latitude and longitude are required." });
@@ -290,7 +280,7 @@ app.get("/api/air-quality", async (req, res) => {
   }
 });
 
-app.post("/api/assistant", assistantRateLimiter, async (req, res) => {
+app.post("/api/assistant", rateLimiters.assistant.middleware, async (req, res) => {
   const parsed = validateAssistantInput(req.body);
   if (parsed.error) {
     return res.status(400).json({ error: parsed.error });
@@ -343,7 +333,20 @@ app.use((err, req, res, _next) => {
   return res.status(500).json({ error: "Unexpected server error." });
 });
 
-export { app, validateAssistantInput, fetchTrustedEnvironmentalData, rateBuckets, RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS };
+export {
+  app,
+  validateAssistantInput,
+  fetchTrustedEnvironmentalData,
+  cachedFetch,
+  cache,
+  CACHE_MAX_ENTRIES,
+  ENVIRONMENT_CACHE_TTL_MS,
+  rateBuckets,
+  rateLimiters,
+  RATE_LIMIT_MAX,
+  RATE_LIMIT_WINDOW_MS,
+  isOriginAllowed,
+};
 
 if (process.env.NODE_ENV !== "test") {
   app.listen(PORT, "0.0.0.0", () => console.log(`AirSense AI listening on ${PORT}`));

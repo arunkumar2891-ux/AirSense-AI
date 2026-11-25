@@ -190,14 +190,14 @@ function App() {
       <a className="nav active"><Activity size={17}/> Overview</a>
       <a className="nav"><MessageCircle size={17}/> AI Assistant <span className="nav-dot"/></a>
       <a className="nav"><Compass size={17}/> Explore areas</a>
-      <div className="sidebar-bottom"><div className="privacy"><ShieldCheck size={16}/><div><b>Privacy first</b><small>Location is used only to fetch local air data. Coordinates stay in this session and are never sent to the AI model.</small></div></div><small className="version">AIRSENSE AI · HACKATHON EDITION</small></div>
+      <div className="sidebar-bottom"><div className="privacy"><ShieldCheck size={16}/><div><b>Privacy first</b><small>Location is used for local air data. GPS coordinates are shared directly with BigDataCloud only to name your location, stay in this session, and are never sent to the AI model.</small></div></div><small className="version">AIRSENSE AI · HACKATHON EDITION</small></div>
     </aside>
     <main className="main">
       <header className="topbar"><div><div className="eyebrow">WEDNESDAY, NOVEMBER 25, 2026</div><h1>Your air, decoded.</h1></div><div className="top-actions"><button className="outline-btn" onClick={returnToGps} disabled={geoBusy}><Crosshair size={15}/> {loc.source === "manual" ? "Back to my location" : "Use my location"}</button><button className="icon-btn" aria-label="Refresh air quality" onClick={() => refresh()}><RefreshCw size={17}/></button><div className="avatar">A</div></div></header>
 
       {showGeoBanner && <div className="geo-banner" role="dialog" aria-label="Location permission">
         <MapPin size={16}/>
-        <div className="geo-banner-text"><b>Use your location?</b><span>AirSense shows air quality for the place you are in. Your coordinates are used only to fetch local data, stay in this browser session, and are never sent to the AI assistant.</span></div>
+        <div className="geo-banner-text"><b>Use your location?</b><span>AirSense uses your coordinates for local air data and shares them directly with BigDataCloud to display a place name. They stay in this browser session and are never sent to the AI assistant.</span></div>
         <button className="geo-allow" onClick={requestGps} disabled={geoBusy}>{geoBusy ? "Locating…" : "Allow location"}</button>
         <button className="geo-dismiss" aria-label="Dismiss" onClick={() => { setShowGeoBanner(false); setGeoNotice("No problem — showing the demo city. Search for any place below."); try { sessionStorage.setItem(KEY_GEO_ASKED, "1"); } catch { /* ignore */ } }}><X size={14}/></button>
       </div>}

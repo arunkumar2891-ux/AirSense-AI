@@ -58,7 +58,9 @@ globalThis.fetch = async (url, options) => {
   return { ok: true, json: async () => ({ current: { temperature_2m: 28 } }) };
 };
 
-const { app, rateBuckets } = await import("./index.js");
+const {
+  app, rateBuckets, rateLimiters, cache, isOriginAllowed, fetchTrustedEnvironmentalData,
+} = await import("./index.js");
 
 function request(appInstance, { method = "GET", url, body, headers = {} }) {
   return new Promise((resolve, reject) => {
@@ -83,6 +85,8 @@ test.beforeEach(() => {
   upstreamCalls = [];
   failGeocoding = false;
   rateBuckets.clear();
+  for (const limiter of Object.values(rateLimiters)) limiter.buckets.clear();
+  cache.clear();
 });
 
 test.after(() => {
@@ -148,6 +152,15 @@ test("air-quality endpoint returns consistent JSON error on bad coords", async (
   assert.match(res.body.error, /latitude and longitude/i);
 });
 
+test("nearby environmental coordinates share normalized upstream cache keys", async () => {
+  await fetchTrustedEnvironmentalData(17.381, 78.489);
+  await fetchTrustedEnvironmentalData(17.384, 78.491);
+  const environmentalCalls = upstreamCalls.filter((url) =>
+    url.includes("air-quality-api.open-meteo.com") || url.includes("api.open-meteo.com/v1/forecast"));
+  assert.equal(environmentalCalls.length, 2, "one air and one weather request should be shared");
+  assert.ok(environmentalCalls.every((url) => url.includes("latitude=17.38") && url.includes("longitude=78.49")));
+});
+
 test("geocode rejects too-short query", async () => {
   const res = await request(app, { method: "GET", url: "/api/geocode?q=h" });
   assert.equal(res.status, 400);
@@ -173,25 +186,26 @@ test("geocode upstream failure returns 502/504 without internals", async () => {
   assert.ok(!("detail" in res.body), "no internal detail leaked");
 });
 
-test("reverse-geocode rejects invalid coordinates", async () => {
-  const res = await request(app, { method: "GET", url: "/api/reverse-geocode?lat=200&lon=0" });
-  assert.equal(res.status, 400);
-  assert.match(res.body.error, /latitude and longitude/i);
+test("reverse-geocode server fallback is honest and does not share coordinates upstream", async () => {
+  const res = await request(app, { method: "GET", url: "/api/reverse-geocode" });
+  assert.equal(res.status, 200);
+  assert.equal(res.body.label, "Your location");
+  assert.equal(res.body.fallback, true);
+  assert.ok(!upstreamCalls.some((url) => url.includes("bigdatacloud")));
 });
 
-test("reverse-geocode returns a friendly label", async () => {
+test("reverse-geocode fallback never forwards supplied coordinate parameters", async () => {
   const res = await request(app, { method: "GET", url: "/api/reverse-geocode?lat=17.385&lon=78.4867" });
   assert.equal(res.status, 200);
-  assert.equal(res.body.label, "Hyderabad, Telangana, India");
-  assert.equal(res.body.country, "India");
+  assert.deepEqual(res.body, { label: "Your location", fallback: true });
+  assert.equal(upstreamCalls.length, 0);
 });
 
-test("reverse-geocode upstream failure returns 502/504 without internals", async () => {
-  failGeocoding = true;
-  const res = await request(app, { method: "GET", url: "/api/reverse-geocode?lat=1.23&lon=4.56" });
-  assert.ok([502, 504].includes(res.status));
-  assert.match(res.body.error, /temporarily unavailable/i);
-  assert.ok(!("detail" in res.body), "no internal detail leaked");
+test("production CORS allows configured/local origins and rejects unapproved origins", () => {
+  assert.equal(isOriginAllowed("https://airsense.example", true, "https://airsense.example"), true);
+  assert.equal(isOriginAllowed("http://localhost:5173", true), false);
+  assert.equal(isOriginAllowed("https://unapproved.example", true), false);
+  assert.equal(isOriginAllowed("https://unapproved.example", false), true);
 });
 
 test("rate limit returns 429 after configured max", async () => {
@@ -206,4 +220,41 @@ test("rate limit returns 429 after configured max", async () => {
   assert.equal(last.status, 429);
   assert.match(last.body.error, /too many/i);
   assert.ok(last.headers.get("retry-after"));
+});
+
+async function exhaustEndpoint(url, limiter, options = {}) {
+  let response;
+  for (let i = 0; i <= limiter.max; i++) {
+    response = await request(app, {
+      url,
+      ...options,
+      headers: { "x-forwarded-for": `198.51.100.${(i % 200) + 1}`, ...(options.headers || {}) },
+    });
+  }
+  assert.equal(response.status, 429, `${url} must be rate limited`);
+  assert.ok(response.headers.get("retry-after"));
+  assert.equal(response.headers.get("ratelimit-limit"), String(limiter.max));
+  assert.ok(response.headers.get("ratelimit-policy"));
+}
+
+test("air-quality endpoint is rate limited and ignores arbitrary forwarded IPs in development", async () => {
+  await exhaustEndpoint("/api/air-quality?lat=17.385&lon=78.4867", rateLimiters.airQuality);
+});
+
+test("geocode endpoint is rate limited", async () => {
+  await exhaustEndpoint("/api/geocode?q=hyderabad", rateLimiters.geocode);
+});
+
+test("reverse-geocode fallback endpoint is rate limited", async () => {
+  await exhaustEndpoint("/api/reverse-geocode", rateLimiters.reverseGeocode);
+});
+
+test("health endpoint remains available beyond data endpoint limits", async () => {
+  rateLimiters.airQuality.buckets.set("127.0.0.1", { count: 10000, resetAt: Date.now() + 60000 });
+  for (let i = 0; i < 5; i++) {
+    const res = await request(app, { url: "/api/health" });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.ok, true);
+    assert.equal(res.headers.get("ratelimit-limit"), null);
+  }
 });

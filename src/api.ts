@@ -26,8 +26,30 @@ export async function searchLocations(query: string): Promise<LocationResult[]> 
 }
 
 export async function reverseGeocode(lat: number, lon: number): Promise<{ label: string }> {
-  const response = await fetch(`/api/reverse-geocode?lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}`);
-  const data = await response.json();
-  if (!response.ok) throw new Error(data.error || "Reverse geocoding failed.");
-  return data as { label: string };
+  try {
+    const query = new URLSearchParams({
+      latitude: String(lat),
+      longitude: String(lon),
+      localityLanguage: "en",
+    });
+    // BigDataCloud licenses this no-key endpoint for direct browser requests
+    // using the device's current GPS position, not for server-side proxying.
+    const response = await fetch(`https://api.bigdatacloud.net/data/reverse-geocode-client?${query}`, {
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!response.ok) throw new Error("Reverse geocoding unavailable");
+    const data = await response.json();
+    const city = data.city || data.locality || "";
+    const label = [city, data.principalSubdivision || "", data.countryName || ""].filter(Boolean).join(", ");
+    if (label) return { label };
+  } catch {
+    // Fall through to the server's coordinate-free, honest generic label.
+  }
+  try {
+    const fallback = await fetch("/api/reverse-geocode");
+    if (fallback.ok) return await fallback.json() as { label: string };
+  } catch {
+    // Offline fallback below.
+  }
+  return { label: "Your location" };
 }
