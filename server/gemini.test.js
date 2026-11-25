@@ -6,6 +6,7 @@ process.env.NODE_ENV = "test";
 let mockBehavior = { type: "success" };
 let mockCalls = [];
 let lastPrompt = "";
+let lastGenerateArgs = null;
 
 const VALID_STRUCTURED = {
   summary: "US AQI is 172 (Unhealthy for sensitive groups).",
@@ -19,6 +20,7 @@ const VALID_STRUCTURED = {
 class FakeModels {
   async generateContent(args) {
     mockCalls.push(1);
+    lastGenerateArgs = args;
     lastPrompt = JSON.stringify(args);
     const b = mockBehavior.type;
     if (b === "success" || (b === "failThenSuccess" && mockCalls.length > 1)) {
@@ -29,6 +31,12 @@ class FakeModels {
     if (b === "semanticContradiction") return { text: JSON.stringify({ ...VALID_STRUCTURED, recommendation: "suitable", summary: "Nothing in these conditions should alter the planned outing." }) };
     if (b === "invalidRecommendation") return { text: JSON.stringify({ ...VALID_STRUCTURED, recommendation: "go_ahead" }) };
     if (b === "timeout") { const e = new Error("Request timed out"); e.name = "TimeoutError"; throw e; }
+    if (b === "hang") return new Promise(() => {});
+    if (b === "timeoutOnRetry") {
+      if (mockCalls.length === 1) { const e = new Error("503 Service Unavailable"); e.status = 503; throw e; }
+      return new Promise(() => {});
+    }
+    if (b === "alwaysTransient") { const e = new Error("503 Service Unavailable"); e.status = 503; throw e; }
     if (b === "rateLimit") { const e = new Error("429 Too Many Requests"); e.status = 429; throw e; }
     if (b === "failThenSuccess") { const e = new Error("503 Service Unavailable"); e.status = 503; throw e; }
     throw new Error("unknown mock");
@@ -57,7 +65,12 @@ const context = {
 
 test.beforeEach(() => {
   mockCalls = [];
+  lastGenerateArgs = null;
   mockBehavior = { type: "success" };
+  AI_CONFIG.apiKey = "test-key-SECRET-12345";
+  AI_CONFIG.timeoutMs = 18000;
+  AI_CONFIG.maxRetries = 2;
+  AI_CONFIG.sleep = () => Promise.resolve();
 });
 
 test("valid structured response is parsed and formatted", async () => {
@@ -81,6 +94,90 @@ test("gemini timeout falls back to deterministic", async () => {
   const result = await askGemini("Can I run?", context, trusted);
   assert.equal(result.mode, "rules-fallback");
   assert.equal(result.answer, context.answer);
+});
+
+test("passes the remaining AI_TIMEOUT_MS budget to SDK httpOptions.timeout", async () => {
+  AI_CONFIG.timeoutMs = 1000;
+  await askGemini("Can I run?", context, trusted);
+  assert.ok(lastGenerateArgs.config.httpOptions.timeout > 0);
+  assert.ok(lastGenerateArgs.config.httpOptions.timeout <= 1000);
+  assert.ok(lastGenerateArgs.config.abortSignal instanceof AbortSignal);
+});
+
+test("a hanging SDK request is bounded by the configured timeout", async () => {
+  AI_CONFIG.timeoutMs = 40;
+  AI_CONFIG.maxRetries = 0;
+  mockBehavior = { type: "hang" };
+  const started = Date.now();
+  const result = await askGemini("Can I run?", context, trusted);
+  const elapsed = Date.now() - started;
+  assert.equal(result.mode, "rules-fallback");
+  assert.equal(result.answer, context.answer);
+  assert.ok(elapsed >= 25 && elapsed < 500, `elapsed ${elapsed}ms`);
+  assert.ok(lastGenerateArgs.config.httpOptions.timeout > 0 && lastGenerateArgs.config.httpOptions.timeout <= 40);
+  assert.equal(lastGenerateArgs.config.abortSignal.aborted, true);
+});
+
+test("timeout preserves the complete deterministic exposure decision", async () => {
+  AI_CONFIG.timeoutMs = 30;
+  AI_CONFIG.maxRetries = 0;
+  mockBehavior = { type: "hang" };
+  const decision = {
+    overallRisk: "very_high", activityRecommendation: "avoid",
+    recommendedAction: "Avoid outdoor running.",
+    reasoning: "US AQI is unhealthy.",
+    sensitiveGroupAdvice: "Follow official guidance.", alternativeActivity: "Indoor exercise.",
+    dataFreshness: { state: "fresh", ageMs: 1000, label: "fresh" },
+    limitations: "Modelled data; not medical advice.",
+  };
+  const result = await askGemini("Can I run?", context, trusted, decision);
+  assert.equal(result.mode, "rules-fallback");
+  assert.equal(result.answer, context.answer);
+  assert.deepEqual(result.decision, decision);
+  assert.doesNotMatch(result.note, /timeout|provider error|deadline/i);
+});
+
+test("timeout during a retry stops further attempts and falls back", async () => {
+  AI_CONFIG.timeoutMs = 50;
+  AI_CONFIG.maxRetries = 3;
+  mockBehavior = { type: "timeoutOnRetry" };
+  const result = await askGemini("Can I run?", context, trusted);
+  assert.equal(mockCalls.length, 2);
+  assert.equal(result.mode, "rules-fallback");
+  assert.equal(result.answer, context.answer);
+});
+
+test("overall deadline bounds multiple retries and backoff", async () => {
+  AI_CONFIG.timeoutMs = 70;
+  AI_CONFIG.maxRetries = 3;
+  AI_CONFIG.sleep = () => new Promise((resolve) => setTimeout(resolve, 25));
+  mockBehavior = { type: "alwaysTransient" };
+  const started = Date.now();
+  const result = await askGemini("Can I run?", context, trusted);
+  const elapsed = Date.now() - started;
+  assert.equal(result.mode, "rules-fallback");
+  assert.ok(mockCalls.length >= 2 && mockCalls.length < 4, `attempts ${mockCalls.length}`);
+  assert.ok(elapsed >= 50 && elapsed < 500, `elapsed ${elapsed}ms`);
+});
+
+test("timeout logs contain no API key, coordinates, or provider error details", async () => {
+  AI_CONFIG.timeoutMs = 30;
+  AI_CONFIG.maxRetries = 0;
+  mockBehavior = { type: "hang" };
+  const logs = [];
+  const origLog = console.log;
+  console.log = (...args) => logs.push(args.join(" "));
+  try {
+    await askGemini("Can I run?", context, trusted);
+  } finally {
+    console.log = origLog;
+  }
+  const output = logs.join("\n");
+  assert.ok(!output.includes(AI_CONFIG.apiKey));
+  assert.ok(!output.includes("17.385"));
+  assert.ok(!output.includes("78.4867"));
+  assert.ok(!output.includes("exceeded its configured deadline"));
+  assert.match(output, /TimeoutError/);
 });
 
 test("429 rate limit is retried then falls back", async () => {

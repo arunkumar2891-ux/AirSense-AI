@@ -1,12 +1,15 @@
 import { GoogleGenAI } from "@google/genai";
 
 // ---------- Configuration ----------
+const configuredTimeoutMs = Number(process.env.AI_TIMEOUT_MS);
 export const AI_CONFIG = {
   provider: (process.env.AI_PROVIDER || "gemini").toLowerCase(),
   apiKey: process.env.AI_API_KEY || "",
   sleep: null, // test hook: set to a no-op to skip real backoff delays
   model: process.env.AI_MODEL || "gemini-3.8-flash",
-  timeoutMs: Math.max(1000, Number(process.env.AI_TIMEOUT_MS) || 18000),
+  timeoutMs: Number.isFinite(configuredTimeoutMs) && configuredTimeoutMs > 0
+    ? Math.max(1000, configuredTimeoutMs)
+    : 18000,
   maxRetries: Math.max(0, Math.min(3, Number(process.env.AI_MAX_RETRIES) || 2)),
   maxOutputTokens: Math.max(256, Number(process.env.AI_MAX_OUTPUT_TOKENS) || 1024),
 };
@@ -147,6 +150,42 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+function timeoutError() {
+  const error = new Error("Gemini operation exceeded its configured deadline");
+  error.name = "TimeoutError";
+  return error;
+}
+
+function runWithDeadline(operation, remainingMs, onTimeout) {
+  if (remainingMs <= 0) return Promise.reject(timeoutError());
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      onTimeout?.();
+      reject(timeoutError());
+    }, remainingMs);
+
+    Promise.resolve()
+      .then(operation)
+      .then(
+        (value) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          resolve(value);
+        },
+        (error) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          reject(error);
+        },
+      );
+  });
+}
+
 // ---------- Logging (never keys, never personal data) ----------
 function logAI(event) {
   const { model, latencyMs, success, mode, attempt, errorType } = event;
@@ -172,22 +211,33 @@ export async function askGemini(question, context, trusted, decision = null) {
   const system = buildSystemPrompt(context, decision);
   const userPrompt = buildUserPrompt(question, context, trusted);
   const ai = getClient();
+  const deadlineAt = Date.now() + AI_CONFIG.timeoutMs;
 
-  let lastError;
+  let finalAttempt = 0;
   for (let attempt = 0; attempt <= AI_CONFIG.maxRetries; attempt++) {
+    finalAttempt = attempt;
+    const remainingMs = deadlineAt - Date.now();
+    if (remainingMs <= 0) break;
     const start = Date.now();
+    const controller = new AbortController();
     try {
-      const response = await ai.models.generateContent({
-        model: AI_CONFIG.model,
-        contents: [{ role: "user", parts: [{ text: userPrompt }] }],
-        config: {
-          systemInstruction: system,
-          responseMimeType: "application/json",
-          responseSchema: RESPONSE_SCHEMA,
-          temperature: 0.25,
-          maxOutputTokens: AI_CONFIG.maxOutputTokens,
-        },
-      });
+      const response = await runWithDeadline(
+        () => ai.models.generateContent({
+          model: AI_CONFIG.model,
+          contents: [{ role: "user", parts: [{ text: userPrompt }] }],
+          config: {
+            systemInstruction: system,
+            responseMimeType: "application/json",
+            responseSchema: RESPONSE_SCHEMA,
+            temperature: 0.25,
+            maxOutputTokens: AI_CONFIG.maxOutputTokens,
+            httpOptions: { timeout: remainingMs },
+            abortSignal: controller.signal,
+          },
+        }),
+        remainingMs,
+        () => controller.abort(),
+      );
       const latencyMs = Date.now() - start;
       const text = response?.text;
       const structured = parseStructuredResponse(text);
@@ -207,13 +257,21 @@ export async function askGemini(question, context, trusted, decision = null) {
       return { answer: formatStructuredAnswer(structured, context.answer), mode: "ai", structured, decision };
     } catch (err) {
       const latencyMs = Date.now() - start;
-      lastError = err;
       const errorType = err?.name || "Error";
       logAI({ model: AI_CONFIG.model, latencyMs, success: false, mode: "ai", attempt, errorType });
       if (attempt < AI_CONFIG.maxRetries && isTransient(err)) {
+        const remainingAfterAttempt = deadlineAt - Date.now();
+        if (remainingAfterAttempt <= 0) break;
         const baseDelay = 500 * 2 ** attempt;
         const jitter = Math.random() * baseDelay;
-        await (AI_CONFIG.sleep || sleep)(baseDelay + jitter);
+        try {
+          await runWithDeadline(
+            () => (AI_CONFIG.sleep || sleep)(baseDelay + jitter),
+            remainingAfterAttempt,
+          );
+        } catch {
+          break;
+        }
         continue;
       }
       break;
@@ -221,7 +279,7 @@ export async function askGemini(question, context, trusted, decision = null) {
   }
 
   // Deterministic fallback
-  logAI({ model: AI_CONFIG.model, latencyMs: 0, success: false, mode: "rules-fallback", attempt: AI_CONFIG.maxRetries });
+  logAI({ model: AI_CONFIG.model, latencyMs: 0, success: false, mode: "rules-fallback", attempt: finalAttempt });
   return {
     answer: context.answer,
     mode: "rules-fallback",

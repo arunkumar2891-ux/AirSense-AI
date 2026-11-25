@@ -105,7 +105,7 @@ Model identifier verified against the [official Gemini API model list](https://a
 Optional tuning:
 
 ```env
-AI_TIMEOUT_MS=18000      # request timeout
+AI_TIMEOUT_MS=18000      # overall deadline, including SDK calls, retries and backoff
 AI_MAX_RETRIES=2         # retries on transient errors (429, 500, 503)
 AI_MAX_OUTPUT_TOKENS=1024 # keep responses concise
 ```
