@@ -14,11 +14,17 @@ import { BoundedTTLCache, normalizeCoordinates } from "./cache.js";
 import { createRateLimiter } from "./rate-limit.js";
 
 const IS_PRODUCTION = process.env.NODE_ENV === "production";
+// Vercel sets this to the string "1". Render and local processes leave it unset.
+const ON_VERCEL = process.env.VERCEL === "1";
 const app = express();
 app.disable("x-powered-by");
-// Only private/loopback deployment proxies may supply client-forwarding data.
-// Direct public clients cannot select their own rate-limit identity with XFF.
-app.set("trust proxy", IS_PRODUCTION ? "loopback, linklocal, uniquelocal" : false);
+// Vercel is exactly one forwarding hop and overwrites X-Forwarded-For.
+// Render continues to trust only private-network proxies. Local development
+// trusts none, so a direct client cannot choose its rate-limit identity.
+app.set(
+  "trust proxy",
+  ON_VERCEL ? 1 : (IS_PRODUCTION ? "loopback, linklocal, uniquelocal" : false),
+);
 
 const PORT = Number(process.env.PORT || 10000);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -841,6 +847,8 @@ export {
   isOriginAllowed,
 };
 
-if (process.env.NODE_ENV !== "test") {
+// Vercel imports this module as a function and must not bind a port.
+// Render and local `npm start` still listen. Tests set NODE_ENV=test.
+if (!ON_VERCEL && process.env.NODE_ENV !== "test") {
   app.listen(PORT, "0.0.0.0", () => console.log(`AirSense AI listening on ${PORT}`));
 }

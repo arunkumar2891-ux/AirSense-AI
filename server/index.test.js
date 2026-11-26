@@ -1,5 +1,9 @@
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 // Set test env BEFORE importing the app module.
 process.env.NODE_ENV = "test";
@@ -65,6 +69,8 @@ globalThis.fetch = async (url, options) => {
 const {
   app, rateBuckets, rateLimiters, cache, geocodeCache, isOriginAllowed, fetchTrustedEnvironmentalData,
 } = await import("./index.js");
+const vercelFunction = await import("../api/[...path].js");
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 function request(appInstance, { method = "GET", url, body, headers = {} }) {
   return new Promise((resolve, reject) => {
@@ -347,4 +353,85 @@ test("health endpoint remains available beyond data endpoint limits", async () =
     assert.equal(res.headers.get("ratelimit-limit"), null);
   }
 });
+});
+
+function loadDeploymentApp(overrides) {
+  const script = `
+    import net from "node:net";
+    const { app } = await import("./server/index.js");
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const servers = process._getActiveHandles().filter((handle) => handle instanceof net.Server);
+    process.stdout.write(JSON.stringify({ trustProxy: app.get("trust proxy"), listeners: servers.length }));
+    for (const server of servers) server.close();
+    process.exit(0);
+  `;
+  const childEnv = { ...process.env, ...overrides };
+  if (!Object.hasOwn(overrides, "VERCEL")) delete childEnv.VERCEL;
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ["--input-type=module", "-e", script], {
+      cwd: repoRoot,
+      env: childEnv,
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.on("error", reject);
+    child.on("exit", (code) => {
+      if (code !== 0) {
+        reject(new Error(`deployment process exited ${code}: ${stderr}\n${stdout}`));
+        return;
+      }
+      const payload = stdout.trim().split("\n").find((line) => line.startsWith("{"));
+      resolve(JSON.parse(payload));
+    });
+  });
+}
+
+test("the imported test server does not listen and does not trust a proxy", () => {
+  assert.equal(app.get("trust proxy"), false);
+});
+
+test("Vercel mode exports the Express app, trusts one hop, and does not listen", async () => {
+  assert.equal(vercelFunction.default, app);
+  const vercel = await loadDeploymentApp({
+    NODE_ENV: "production",
+    VERCEL: "1",
+    PORT: "10000",
+  });
+  assert.equal(vercel.trustProxy, 1);
+  assert.notEqual(vercel.trustProxy, true);
+  assert.equal(vercel.listeners, 0);
+});
+
+test("Render production keeps private-network proxy trust and listens", async () => {
+  const render = await loadDeploymentApp({ NODE_ENV: "production", PORT: "0" });
+  assert.equal(render.trustProxy, "loopback, linklocal, uniquelocal");
+  assert.equal(render.listeners, 1);
+});
+
+test("a VERCEL value other than 1 keeps the Render proxy configuration", async () => {
+  const render = await loadDeploymentApp({ NODE_ENV: "production", VERCEL: "0", PORT: "0" });
+  assert.equal(render.trustProxy, "loopback, linklocal, uniquelocal");
+  assert.equal(render.listeners, 1);
+});
+
+test("Vercel static config publishes dist, leaves API paths unchanged, and limits the function to 300 seconds", () => {
+  const config = JSON.parse(readFileSync(path.join(repoRoot, "vercel.json"), "utf8"));
+  assert.equal(config.framework, "vite");
+  assert.equal(config.buildCommand, "npm run build");
+  assert.equal(config.outputDirectory, "dist");
+  assert.equal(config.functions["api/[...path].js"].maxDuration, 300);
+  assert.equal(config.rewrites.length, 1);
+  assert.equal(config.rewrites[0].source, "/((?!api$|api/).*)");
+  assert.equal(config.rewrites[0].destination, "/index.html");
+  assert.equal(config.headers.length, 1);
+  assert.equal(config.headers[0].source, "/((?!api$|api/).*)");
+  const headerNames = config.headers[0].headers.map((header) => header.key);
+  assert.ok(headerNames.includes("Content-Security-Policy"));
+  assert.equal(headerNames.includes("Cross-Origin-Embedder-Policy"), false);
+  const csp = config.headers[0].headers.find((header) => header.key === "Content-Security-Policy").value;
+  assert.match(csp, /connect-src 'self' https:\/\/api\.bigdatacloud\.net/);
+  assert.match(csp, /frame-ancestors 'none'/);
+  assert.match(csp, /script-src 'self'/);
 });
