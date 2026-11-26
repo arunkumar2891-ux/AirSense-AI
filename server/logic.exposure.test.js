@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildExposureDecision, buildRecommendationContext, getAQIStatus, getPM25Status, getDataFreshness, insufficientExposureGuidance } from "./logic.js";
+import { buildExposureDecision, buildRecommendationContext, buildWindHypothetical, getAQIStatus, getPM25Status, getDataFreshness, insufficientExposureGuidance, parseWindHypothetical } from "./logic.js";
 
 function makeAir(overrides = {}) {
   return {
@@ -393,4 +393,68 @@ test("stale, missing, invalid, and future air retrieval cannot recommend favorab
   assert.equal(recovered.activityRecommendation, "suitable");
   assert.equal(recoveredContext.recommendation, getAQIStatus(41).advice);
   assert.match(recoveredContext.recommendation, /generally satisfactory/);
+});
+
+test("decision trace matches the deterministic engine output", () => {
+  const now = Date.parse("2026-11-26T12:00:00.000Z");
+  const air = makeAir({
+    aqi: 101,
+    pollutants: { pm25: 8 },
+    weather: { wind_speed_10m: 12 },
+    forecastValidAt: "2026-11-26T11:00:00.000Z",
+    retrievedAt: "2026-11-26T11:58:00.000Z",
+    weatherRetrievedAt: "2026-11-26T11:58:00.000Z",
+    metadata: { isModelledEstimate: true },
+  });
+  const profile = makeProfile({ activity: "running", ageGroup: "child", sensitivity: "general" });
+  const decision = buildExposureDecision(air, profile, now);
+  assert.equal(decision.activityRecommendation, "caution");
+  assert.equal(decision.trace.scoringApplied, true);
+  assert.equal(decision.trace.airQuality.value, 101);
+  assert.equal(decision.trace.airQuality.category, getAQIStatus(101).label);
+  assert.equal(decision.trace.pm25.value, 8);
+  assert.equal(decision.trace.pm25.category, getPM25Status(8).label);
+  assert.equal(decision.trace.weather.freshnessState, decision.wind.freshness.state);
+  assert.equal(decision.trace.wind.points, decision.wind.points);
+  assert.equal(decision.trace.wind.disclosure, decision.wind.disclosure);
+  const windFactor = decision.trace.factors.find((factor) => factor.factor === "Wind");
+  assert.equal(windFactor.contribution, decision.wind.points);
+  assert.equal(windFactor.detail, decision.wind.disclosure);
+  const sum = decision.trace.factors.reduce((total, factor) => total + factor.contribution, 0);
+  assert.equal(sum, 5.5);
+  assert.equal(decision.trace.result.activityRecommendation, decision.activityRecommendation);
+  assert.equal(decision.trace.result.overallRisk, decision.overallRisk);
+  assert.equal(decision.trace.result.recommendedAction, decision.recommendedAction);
+  assert.equal(decision.trace.profile.activity, "running");
+  assert.equal(decision.trace.profile.ageGroup, "child");
+  assert.equal(decision.trace.unavailable.some((item) => /forecast/i.test(item)), false);
+});
+
+test("a wind hypothetical does not change the actual decision", () => {
+  const now = Date.parse("2026-11-26T12:00:00.000Z");
+  const air = makeAir({
+    aqi: 101,
+    pollutants: { pm25: 8 },
+    weather: { wind_speed_10m: 12 },
+    forecastValidAt: "2026-11-26T11:00:00.000Z",
+    retrievedAt: "2026-11-26T11:58:00.000Z",
+    weatherRetrievedAt: "2026-11-26T11:58:00.000Z",
+    metadata: { isModelledEstimate: true },
+  });
+  const profile = makeProfile({ activity: "running", ageGroup: "child", sensitivity: "general" });
+  const before = buildExposureDecision(air, profile, now);
+  const snapshot = structuredClone(before);
+  const hypothetical = buildWindHypothetical(air, profile, 3, now);
+  assert.deepEqual(buildExposureDecision(air, profile, now), snapshot);
+  assert.equal(before.activityRecommendation, "caution");
+  assert.equal(hypothetical.label, "Hypothetical");
+  assert.equal(hypothetical.assumedWindSpeedKmh, 3);
+  assert.equal(hypothetical.activityRecommendation, "avoid");
+  assert.match(hypothetical.note, /not a retrieved or current measurement/);
+  assert.match(hypothetical.note, /does not change the current decision/);
+  assert.match(hypothetical.windDisclosure, /Assumed wind of 3 km\/h is not a retrieved measurement/);
+  assert.doesNotMatch(hypothetical.windDisclosure, /Retrieved/);
+  assert.equal(parseWindHypothetical("What if the wind speed were 3 km/h instead?"), 3);
+  assert.equal(parseWindHypothetical("Why does PM2.5 matter?"), null);
+  assert.equal(air.weather.wind_speed_10m, 12);
 });

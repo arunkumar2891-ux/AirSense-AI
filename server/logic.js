@@ -159,6 +159,44 @@ export function insufficientExposureGuidance(freshness) {
 }
 
 // ---------- Exposure decision engine ----------
+function pmReading(value) {
+  return value !== null && value !== undefined && value !== "" && Number.isFinite(Number(value)) ? Number(value) : null;
+}
+
+function decisionTrace({
+  air, aqi, aqiValid, aqiStatus, pm25, pm25Status, wind, profileFields, factors,
+  scoringApplied, result, unavailable, vigorousUnhealthyFloor = false, categoryFloor = null, floorApplied = false,
+}) {
+  const pm = pmReading(pm25);
+  return {
+    scoringApplied,
+    airQuality: aqiValid
+      ? { value: aqi, scale: air.aqiScale || "US AQI", category: aqiStatus.label, level: aqiStatus.level }
+      : { value: null, scale: air.aqiScale || "US AQI", category: "Unavailable", level: 0 },
+    pm25: pm === null
+      ? { value: null, category: "Unknown", level: 0 }
+      : { value: pm, category: pm25Status.label, level: pm25Status.level },
+    weather: {
+      windSpeedKmh: wind?.windSpeedKmh ?? null,
+      freshnessState: wind?.freshness?.state ?? "unknown",
+      basis: "weatherRetrievedAt",
+    },
+    wind: {
+      state: wind?.state ?? "unknown",
+      points: wind?.points ?? 0,
+      applied: Boolean(wind?.applied),
+      disclosure: wind?.disclosure ?? "",
+    },
+    profile: profileFields,
+    factors,
+    vigorousUnhealthyFloor,
+    categoryFloor,
+    floorApplied,
+    result,
+    unavailable,
+  };
+}
+
 export function buildExposureDecision(air = {}, profile = {}, now) {
   const aqi = air.aqi !== null && air.aqi !== undefined && air.aqi !== "" ? Number(air.aqi) : null;
   const aqiValid = aqi !== null && Number.isFinite(aqi) && aqi >= 0;
@@ -176,24 +214,37 @@ export function buildExposureDecision(air = {}, profile = {}, now) {
   const hasForecast = hourly !== null && hourly.some((h) => h.aqi !== null);
 
   // ---------- Gate: insufficient data ----------
+  const profileFields = { activity, ageGroup, sensitivity };
   if (!aqiValid) {
-    return {
+    const wind = assessWind(air, now);
+    const result = {
       overallRisk: "unknown",
       activityRecommendation: "insufficient_data",
       recommendedAction: "Check a local regulatory monitoring station before making exposure decisions.",
+    };
+    return {
+      ...result,
       reasoning: "No valid AQI reading is available from the provider. Decisions require current data.",
       sensitiveGroupAdvice: isSensitive ? "Without current data, sensitive individuals should avoid prolonged outdoor exertion as a precaution." : "No specific guidance available without data.",
       alternativeActivity: "Consider indoor activities until current readings resume.",
       dataFreshness: freshness,
-      wind: assessWind(air, now),
+      wind,
       limitations: "AQI unavailable from provider. No forecast or historical trend can substitute for current readings. Always follow official local public-health advisories.",
+      trace: decisionTrace({
+        air, aqi, aqiValid, aqiStatus, pm25, pm25Status, wind, profileFields, factors: [],
+        scoringApplied: false, result, unavailable: ["US AQI is unavailable, so no exposure score was calculated."],
+      }),
     };
   }
   if (freshness.state === "stale" || freshness.state === "unknown") {
-    return {
+    const wind = assessWind(air, now);
+    const result = {
       overallRisk: "unknown",
       activityRecommendation: "insufficient_data",
       recommendedAction: insufficientExposureGuidance(freshness),
+    };
+    return {
+      ...result,
       reasoning: freshness.state === "stale"
         ? modelled
           ? `Forecast data was retrieved ${Math.round(freshness.ageMs / 3600000)} hours ago. Air quality can change significantly within hours.`
@@ -204,32 +255,61 @@ export function buildExposureDecision(air = {}, profile = {}, now) {
       sensitiveGroupAdvice: isSensitive ? "Treat unverified data with extra caution and consult official local guidance." : "Refresh for a time-verified reading.",
       alternativeActivity: "Consider indoor activities until time-verified environmental data is available.",
       dataFreshness: freshness,
-      wind: assessWind(air, now),
+      wind,
       limitations: `Data freshness (${freshness.state}) prevents a reliable environmental exposure assessment. This is not medical advice; follow official local public-health advisories.`,
+      trace: decisionTrace({
+        air, aqi, aqiValid, aqiStatus, pm25, pm25Status, wind, profileFields, factors: [],
+        scoringApplied: false,
+        result,
+        unavailable: [freshness.state === "stale" ? "Retrieved air-quality data is too old to score." : "The air-quality retrieval time is missing, invalid, or too far in the future."],
+      }),
     };
   }
 
   // ---------- Risk scoring (higher = worse) ----------
+  // Each factor records the same points added to the score. This is the
+  // decision trace, not model reasoning.
   let riskScore = 0;
+  const factors = [];
 
-  // AQI contribution
-  riskScore += aqiStatus.level; // 1-6
+  riskScore += aqiStatus.level;
+  factors.push({ factor: "US AQI", detail: `US AQI ${aqi} is ${aqiStatus.label}.`, contribution: aqiStatus.level });
 
-  // PM2.5 independent contribution — can elevate risk beyond AQI alone
-  riskScore += Math.max(0, pm25Status.level - 1); // 0-4
+  const pmContribution = Math.max(0, pm25Status.level - 1);
+  riskScore += pmContribution;
+  const pmValid = pm25 !== null && pm25 !== undefined && pm25 !== "" && Number.isFinite(Number(pm25));
+  factors.push({
+    factor: "PM2.5",
+    detail: pmValid ? `PM2.5 is ${pm25} µg/m³ (${pm25Status.label}).` : "PM2.5 is unavailable and was not treated as clean air.",
+    contribution: pmContribution,
+  });
 
-  // Activity intensity
-  if (isVigorous(activity)) riskScore += 1;
-  if (isProlonged(activity)) riskScore += 0.5;
+  if (isVigorous(activity)) {
+    riskScore += 1;
+    factors.push({ factor: "Activity", detail: `${activity} is vigorous.`, contribution: 1 });
+  } else if (isProlonged(activity)) {
+    riskScore += 0.5;
+    factors.push({ factor: "Activity", detail: `${activity} is prolonged.`, contribution: 0.5 });
+  } else {
+    factors.push({ factor: "Activity", detail: `${activity} adds no intensity adjustment.`, contribution: 0 });
+  }
 
-  // Vulnerability
-  if (isSensitive) riskScore += 1;
-  if (isChild) riskScore += 0.5;
+  if (isSensitive) {
+    riskScore += 1;
+    factors.push({ factor: "Profile", detail: "The selected age group or sensitivity adds risk.", contribution: 1 });
+  }
+  if (isChild) {
+    riskScore += 0.5;
+    factors.push({ factor: "Age", detail: "A child profile or children's outdoor play adds risk.", contribution: 0.5 });
+  }
 
   // Wind below 5 km/h adds 0.5 only when this weather response has its own
   // usable retrieval time. The air-quality retrievedAt is never a substitute.
   const wind = assessWind(air, now);
   if (wind.points) riskScore += wind.points;
+  factors.push({ factor: "Wind", detail: wind.disclosure, contribution: wind.points });
+  const vigorousUnhealthyFloor = aqiStatus.level >= 4 && isVigorous(activity);
+  if (vigorousUnhealthyFloor) riskScore = Math.max(riskScore, 6);
 
   // Forecast trend is context only. Forecasts must never change the current
   // exposure recommendation, which is based on current observed/modelled data.
@@ -244,11 +324,7 @@ export function buildExposureDecision(air = {}, profile = {}, now) {
   }
 
   // ---------- Map score to decision ----------
-  // AQI level 4+ (Unhealthy) with vigorous activity is always avoid.
   let overallRisk, activityRecommendation, recommendedAction;
-  if (aqiStatus.level >= 4 && isVigorous(activity)) {
-    riskScore = Math.max(riskScore, 6);
-  }
   if (riskScore <= 2.5) {
     overallRisk = "low";
     activityRecommendation = "suitable";
@@ -274,6 +350,7 @@ export function buildExposureDecision(air = {}, profile = {}, now) {
   // Conservative AQI-category floors apply independently of PM2.5
   // availability. PM2.5 may elevate a recommendation but its absence cannot
   // weaken the minimum recommendation implied by the reported US AQI.
+  const scoredRecommendation = activityRecommendation;
   const recommendationRank = { suitable: 0, caution: 1, avoid: 2 };
   const categoryFloor = aqiStatus.level >= 5
     ? "avoid"
@@ -327,6 +404,10 @@ export function buildExposureDecision(air = {}, profile = {}, now) {
     "Always follow official local public-health advisories over this guidance.",
   ];
 
+  const unavailable = [];
+  if (!pmValid) unavailable.push("PM2.5 is unavailable and was not treated as clean air.");
+  if (String(wind.state || "").startsWith("excluded")) unavailable.push(wind.disclosure);
+  if (!hasForecast) unavailable.push("No forecast trend is available. The current recommendation does not use a forecast.");
   return {
     overallRisk,
     activityRecommendation,
@@ -337,6 +418,56 @@ export function buildExposureDecision(air = {}, profile = {}, now) {
     dataFreshness: freshness,
     wind,
     limitations: limitations.join(" "),
+    trace: decisionTrace({
+      air, aqi, aqiValid, aqiStatus, pm25, pm25Status, wind, profileFields, factors,
+      scoringApplied: true,
+      vigorousUnhealthyFloor,
+      categoryFloor,
+      floorApplied: activityRecommendation !== scoredRecommendation,
+      result: { overallRisk, activityRecommendation, recommendedAction },
+      unavailable,
+    }),
+  };
+}
+
+const WIND_HYPOTHETICAL = /what if (?:the )?wind(?: speed)? (?:were|was) (\d+(?:\.\d+)?)(?:\s*km\/h)?/i;
+
+export function parseWindHypothetical(question) {
+  const match = WIND_HYPOTHETICAL.exec(String(question || ""));
+  if (!match) return null;
+  const speed = Number(match[1]);
+  if (!Number.isFinite(speed) || speed < 0 || speed > 200) return null;
+  return speed;
+}
+
+function hypotheticalWindDisclosure(scenario, speed) {
+  const formatted = formatWindSpeed(speed);
+  const state = scenario.wind?.state ?? "";
+  const points = scenario.wind?.points ?? 0;
+  if (String(state).startsWith("excluded")) {
+    return `Assumed wind of ${formatted} km/h is not a retrieved measurement. The current weather data still cannot be used, so this scenario does not apply a wind adjustment.`;
+  }
+  if (points > 0) {
+    return `Assumed wind of ${formatted} km/h is not a retrieved measurement. In this scenario it would increase the exposure score by 0.5 points.`;
+  }
+  return `Assumed wind of ${formatted} km/h is not a retrieved measurement. In this scenario it would not change the exposure score.`;
+}
+
+export function buildWindHypothetical(air, profile, speed, now) {
+  const scenario = buildExposureDecision({
+    ...air,
+    weather: { ...(air.weather || {}), wind_speed_10m: speed },
+  }, profile, now);
+  return {
+    kind: "wind_speed",
+    label: "Hypothetical",
+    assumedWindSpeedKmh: speed,
+    note: "This scenario is not a retrieved or current measurement. It does not change the current decision.",
+    activityRecommendation: scenario.activityRecommendation,
+    overallRisk: scenario.overallRisk,
+    recommendedAction: scenario.recommendedAction,
+    windState: scenario.wind?.state ?? null,
+    windDisclosure: hypotheticalWindDisclosure(scenario, speed),
   };
 }
 

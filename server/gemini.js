@@ -1,5 +1,5 @@
 import { GoogleGenAI } from "@google/genai";
-import { buildExplanationClaims } from "./logic.js";
+import { buildExplanationClaims, getAQIStatus, getPM25Status } from "./logic.js";
 
 // ---------- Configuration ----------
 const configuredTimeoutMs = Number(process.env.AI_TIMEOUT_MS);
@@ -35,7 +35,9 @@ const RECOMMENDATIONS = new Set(["suitable", "caution", "avoid", "insufficient_d
 const MAX_CLAIM_IDS = 12;
 const MAX_CLAIM_ID_LENGTH = 64;
 const CLAIM_ID_PATTERN = /^[a-z][a-z0-9_]{0,63}$/;
-const RESPONSE_FIELDS = new Set(["recommendation", "claimIds"]);
+const RESPONSE_FIELDS = new Set(["recommendation", "claimIds", "explanation"]);
+const MIN_EXPLANATION_LENGTH = 40;
+const MAX_EXPLANATION_LENGTH = 900;
 
 const RESPONSE_SCHEMA = {
   type: "OBJECT",
@@ -48,12 +50,105 @@ const RESPONSE_SCHEMA = {
     claimIds: {
       type: "ARRAY",
       items: { type: "STRING" },
-      description: "IDs copied from allowedClaims. Do not invent IDs or write explanation text.",
+      description: "IDs copied from allowedClaims. These are the only current measurements.",
+    },
+    explanation: {
+      type: "STRING",
+      description: "A direct answer to the user's question. Do not invent measurements or number words.",
     },
   },
-  required: ["recommendation", "claimIds"],
-  propertyOrdering: ["recommendation", "claimIds"],
+  required: ["recommendation", "claimIds", "explanation"],
+  propertyOrdering: ["recommendation", "claimIds", "explanation"],
 };
+
+const NUMBER_WORDS = /\b(zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand)\b/i;
+const ABSOLUTE_CURRENT_CLAIMS = /\b(pristine|pollution-free|no pollution|zero risk|completely safe|perfectly safe|guaranteed safe|medical diagnosis|definitely safe|perfectly clean)\b/i;
+const FAVORABLE_ACTIVITY = /\b(safe|suitable|favou?rable|satisfactory|clean|healthy|good to go|fine for|okay to|ok to go|no problem)\b/i;
+const CURRENT_WIND_CLAIM = /\b(?:wind|breeze)\b[\s\S]{0,40}\b(?:is|are|was|were)?\s*(?:light|calm|strong|helping|dispersing|stagnant|fresh|favorable|favourable)\b|\b(?:light|calm|strong|fresh|favorable|favourable)\s+(?:wind|breeze)\b[\s\S]{0,32}\b(?:right now|currently|today|this reading)\b|\b(?:right now|currently|today|this reading|the current)\b[\s\S]{0,40}\b(?:light|calm|strong|fresh|favorable|favourable)\s+(?:wind|breeze)\b/i;
+const CATEGORY_LABELS = [
+  "unhealthy for sensitive groups",
+  "very unhealthy",
+  "hazardous",
+  "unhealthy",
+  "moderate",
+  "good",
+];
+const RECOMMENDATION_WORDS = [
+  ["insufficient data", "insufficient_data"],
+  ["insufficient_data", "insufficient_data"],
+  ["suitable", "suitable"],
+  ["caution", "caution"],
+  ["avoid", "avoid"],
+];
+
+function stripPollutantNames(text) {
+  return text.replace(/\bpm\s*2\.5\b/gi, " ").replace(/\bpm\s*10\b/gi, " ");
+}
+
+function assertedCategories(text) {
+  let rest = text.toLowerCase();
+  const found = [];
+  for (const label of CATEGORY_LABELS) {
+    const re = new RegExp(`(?:category is|aqi is|air quality is|air is|conditions are|pollution is|reading is|classified as)\\s+${label}\\b`, "i");
+    if (re.test(rest)) found.push(label);
+    rest = rest.replaceAll(label, " ");
+  }
+  return found;
+}
+
+function assertedRecommendations(text) {
+  const found = [];
+  const lower = text.toLowerCase();
+  for (const [phrase, value] of RECOMMENDATION_WORDS) {
+    const re = new RegExp(`(?:recommendation is|result is|decision is|would be)\\s+${phrase}\\b`, "i");
+    if (re.test(lower)) found.push(value);
+  }
+  return found;
+}
+
+function allowedCategoryLabels(air) {
+  const labels = new Set();
+  const aqi = validReading(air?.aqi);
+  if (aqi !== null) labels.add(getAQIStatus(aqi).label.toLowerCase());
+  const pm = validReading(air?.pollutants?.pm25);
+  if (pm !== null) labels.add(getPM25Status(pm).label.toLowerCase());
+  return labels;
+}
+
+export function validateExplanation(explanation, { air, decision, hypothetical } = {}) {
+  if (typeof explanation !== "string") return "Explanation is missing.";
+  const text = explanation.trim();
+  if (text.length < MIN_EXPLANATION_LENGTH || text.length > MAX_EXPLANATION_LENGTH) return "Explanation length is outside the allowed range.";
+  if (/\d/.test(stripPollutantNames(text))) return "Explanation contains a measurement.";
+  if (NUMBER_WORDS.test(text)) return "Explanation contains a number word.";
+  if (ABSOLUTE_CURRENT_CLAIMS.test(text)) return "Explanation makes an unsupported claim about current conditions.";
+  const allowedCategories = allowedCategoryLabels(air);
+  for (const label of assertedCategories(text)) {
+    if (!allowedCategories.has(label)) return "Explanation names a category that does not match the trusted reading.";
+  }
+  const recommendation = decision?.activityRecommendation;
+  const allowedRecommendations = new Set([recommendation]);
+  if (hypothetical?.activityRecommendation) allowedRecommendations.add(hypothetical.activityRecommendation);
+  for (const word of assertedRecommendations(text)) {
+    if (!allowedRecommendations.has(word)) return "Explanation states a recommendation that does not match the deterministic decision.";
+  }
+  if (recommendation === "insufficient_data" && FAVORABLE_ACTIVITY.test(text)) {
+    return "Explanation gives a favorable activity recommendation without usable current data.";
+  }
+  const windState = decision?.wind?.state || "";
+  if (String(windState).startsWith("excluded") && CURRENT_WIND_CLAIM.test(text)) {
+    return "Explanation treats excluded wind as a current condition.";
+  }
+  if (hypothetical) {
+    if (!/\bhypothetical\b/i.test(text)) return "Explanation does not label the wind scenario as hypothetical.";
+    if (/\b(retrieved|measured|observed)\b/i.test(text) && /\bwind\b/i.test(text) && !/\bnot (?:a |an )?(?:retrieved|measured|observed)\b/i.test(text)) {
+      return "Explanation presents the hypothetical wind as a retrieved measurement.";
+    }
+  } else if (/\bwould be (suitable|caution|avoid|insufficient)\b/i.test(text)) {
+    return "Explanation invents a hypothetical recommendation.";
+  }
+  return null;
+}
 
 function finiteTimestamp(value) {
   if (typeof value !== "string" || !value.trim()) return null;
@@ -94,11 +189,15 @@ function buildSystemPrompt(context, decision, claims) {
   const lines = [
     "You are AirSense AI, a cautious urban air-quality assistant.",
     "Air-quality values supplied here are modelled estimates, not station observations.",
-    "You select explanation IDs. You do not write environmental facts.",
-    "Return JSON with recommendation and claimIds only.",
+    "You select claim IDs and write an explanation that answers the user's question.",
+    "Return JSON with recommendation, claimIds, and explanation only.",
     "recommendation must equal activityRecommendation exactly.",
     "Every claimIds entry must be copied from allowedClaims. Do not invent IDs.",
-    "Do not write a summary, air-quality assessment, reasoning paragraph, measurement, or forecast.",
+    "explanation answers the question in plain language.",
+    "Do not put digits or number words in explanation. Current measurements belong only in claimIds.",
+    "You may name the supplied category and activityRecommendation, but you may not name a different one.",
+    "A hypothetical wind scenario, when supplied, must be called hypothetical and is not a retrieved measurement.",
+    "Do not invent an alternate recommendation.",
     "Do not treat excluded wind as a current measurement.",
     "Do not describe stale, missing, or unknown weather as current.",
     "Do not override the deterministic exposure decision.",
@@ -114,7 +213,7 @@ function buildSystemPrompt(context, decision, claims) {
   return lines.join("\n");
 }
 
-function buildUserPrompt(question, context, trusted, decision, claims) {
+function buildUserPrompt(question, context, trusted, decision, claims, hypothetical) {
   const meta = trusted.metadata || {};
   const modelInitializationTime = finiteTimestamp(
     trusted.modelInitializedAt ?? meta.timestamps?.modelInitializedAt ?? null,
@@ -146,6 +245,7 @@ function buildUserPrompt(question, context, trusted, decision, claims) {
     source: trusted.source ?? null,
     allowedClaims: claims.map((claim) => ({ id: claim.id, text: claim.text })),
     profile: { activity: context.activity, ageGroup: context.ageGroup, sensitivity: context.sensitivity },
+    ...(hypothetical ? { hypothetical } : {}),
   });
 }
 
@@ -162,7 +262,7 @@ function mismatchError() {
   return error;
 }
 
-function parseStructuredResponse(text, decision, claims) {
+function parseStructuredResponse(text, decision, claims, air, hypothetical) {
   if (!text || typeof text !== "string") throw claimError("Empty model response");
   let parsed;
   try {
@@ -195,12 +295,9 @@ function parseStructuredResponse(text, decision, claims) {
     seen.add(id);
     if (!allowed.has(id)) throw claimError("Model response cites an unknown claim ID");
   }
-  return { recommendation: parsed.recommendation, claimIds: [...parsed.claimIds] };
-}
-
-function assembleClaimAnswer(claimIds, claims) {
-  const textById = new Map(claims.map((claim) => [claim.id, claim.text]));
-  return claimIds.map((id) => textById.get(id)).join(" ");
+  const explanationError = validateExplanation(parsed.explanation, { air, decision, hypothetical });
+  if (explanationError) throw claimError(explanationError);
+  return { recommendation: parsed.recommendation, claimIds: [...parsed.claimIds], explanation: parsed.explanation.trim() };
 }
 
 // ---------- Retry with exponential backoff + jitter ----------
@@ -271,14 +368,15 @@ function logAI(event) {
 }
 
 // ---------- Public API ----------
-export async function askGemini(question, context, trusted, decision = null) {
+export async function askGemini(question, context, trusted, decision = null, options = {}) {
+  const hypothetical = options.hypothetical ?? null;
   if (!AI_CONFIG.apiKey) {
-    return { answer: context.answer, mode: "rules", structured: null, decision };
+    return { answer: context.answer, evidence: [], mode: "rules", structured: null, decision, hypothetical };
   }
 
   const claims = buildExplanationClaims(trusted, decision);
   const system = buildSystemPrompt(context, decision, claims);
-  const userPrompt = buildUserPrompt(question, context, trusted, decision, claims);
+  const userPrompt = buildUserPrompt(question, context, trusted, decision, claims, hypothetical);
   const ai = getClient();
   const deadlineAt = Date.now() + AI_CONFIG.timeoutMs;
 
@@ -311,7 +409,7 @@ export async function askGemini(question, context, trusted, decision = null) {
       const text = response?.text;
       let structured;
       try {
-        structured = parseStructuredResponse(text, decision, claims);
+        structured = parseStructuredResponse(text, decision, claims, trusted, hypothetical);
       } catch (err) {
         const mismatch = err?.name === "RecommendationMismatch";
         logAI({
@@ -324,16 +422,25 @@ export async function askGemini(question, context, trusted, decision = null) {
         });
         return {
           answer: context.answer,
+          evidence: [],
           mode: "rules-fallback",
           structured: null,
           decision,
+          hypothetical,
           note: mismatch
             ? "AI explanation discarded because it did not match the deterministic exposure recommendation."
-            : "AI explanation discarded because the returned claims could not be validated.",
+            : "AI explanation discarded because it could not be validated.",
         };
       }
       logAI({ model: AI_CONFIG.model, latencyMs, success: true, mode: "ai", attempt });
-      return { answer: assembleClaimAnswer(structured.claimIds, claims), mode: "ai", structured, decision };
+      return {
+        answer: structured.explanation,
+        evidence: structured.claimIds.map((id) => claims.find((claim) => claim.id === id)?.text).filter(Boolean),
+        mode: "ai",
+        structured,
+        decision,
+        hypothetical,
+      };
     } catch (err) {
       const latencyMs = Date.now() - start;
       const errorType = err?.name || "Error";
@@ -361,9 +468,11 @@ export async function askGemini(question, context, trusted, decision = null) {
   logAI({ model: AI_CONFIG.model, latencyMs: 0, success: false, mode: "rules-fallback", attempt: finalAttempt });
   return {
     answer: context.answer,
+    evidence: [],
     mode: "rules-fallback",
     structured: null,
     decision,
+    hypothetical,
     note: "AI provider unavailable; using the local safety guidance engine.",
   };
 }

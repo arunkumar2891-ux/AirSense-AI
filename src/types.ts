@@ -90,13 +90,45 @@ export type ExposureDecision = {
     freshness?: { state: string; ageMs: number | null; label: string; timestamp?: string | null; basis?: string };
   };
   limitations: string;
+  trace?: DecisionTrace;
+};
+
+export type DecisionFactor = { factor: string; detail: string; contribution: number };
+
+export type DecisionTrace = {
+  scoringApplied: boolean;
+  airQuality: { value: number | null; scale: string; category: string; level: number };
+  pm25: { value: number | null; category: string; level: number };
+  weather: { windSpeedKmh: number | null; freshnessState: string; basis: string };
+  wind: { state: string; points: number; applied: boolean; disclosure: string };
+  profile: { activity: string; ageGroup: string; sensitivity: string };
+  factors: DecisionFactor[];
+  vigorousUnhealthyFloor: boolean;
+  categoryFloor: string | null;
+  floorApplied: boolean;
+  result: { overallRisk: string; activityRecommendation: string; recommendedAction: string };
+  unavailable: string[];
+};
+
+export type WindHypothetical = {
+  kind: "wind_speed";
+  label: "Hypothetical";
+  assumedWindSpeedKmh: number;
+  note: string;
+  activityRecommendation: string;
+  overallRisk: string;
+  recommendedAction: string;
+  windState: string | null;
+  windDisclosure: string;
 };
 
 export type AssistantResponse = {
   answer: string;
+  evidence?: string[];
   mode: string;
   decision?: ExposureDecision;
-  structured?: Record<string, string>;
+  hypothetical?: WindHypothetical | null;
+  structured?: { recommendation?: string; claimIds?: string[]; explanation?: string };
   note?: string;
 };
 

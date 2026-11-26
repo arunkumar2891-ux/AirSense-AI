@@ -2,14 +2,14 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Activity, ArrowUpRight, Bot, Clock, Cloud, Compass, Crosshair, Leaf, MapPin, MessageCircle, RefreshCw, Search, Send, ShieldCheck, Wind, X } from "lucide-react";
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { askAssistant, findGoWindow, getAirQuality, reverseGeocode, searchLocations } from "./api";
-import type { AirData, ExposureDecision, GoWindowResponse, GoWindowTimePreference, LocationResult, Profile } from "./types";
+import type { AirData, DecisionTrace, ExposureDecision, GoWindowResponse, GoWindowTimePreference, LocationResult, Profile, WindHypothetical } from "./types";
 import { describeCurrentActivityGuidance, describeWindUse, formatReportedWindSpeed, formatSourceDisclosure, formatTimingDisclosure, getAqiPresentation, getFreshnessPresentation, isLatestRequest, shouldApplyGpsResult, US_AQI_CATEGORIES } from "./reliability";
 import { buildGoWindowRequest, DEFAULT_GO_WINDOW_DURATION, DEFAULT_TIME_PREFERENCE, goWindowRequestKey } from "./gowindow";
 import GoWindowPanel from "./GoWindowPanel";
 import ThemeSelector from "./ThemeSelector";
 
 const fallbackCity = { name: "Chennai, Tamil Nadu, India", lat: 13.0827, lon: 80.2707 };
-const prompts = ["Is it safe to go for a run?", "What precautions should my family take?", "Explain today's pollution levels"];
+const prompts = ["Why does PM2.5 matter?", "What precautions should children take?", "Explain today's pollution levels", "How does wind affect outdoor pollution?"];
 
 // Session-scoped storage keys (cleared when the tab closes — precise coordinates
 // are never persisted beyond the session).
@@ -71,7 +71,10 @@ function App() {
   const [error, setError] = useState("");
   const [profile, setProfile] = useState<Profile>({ activity: "running", ageGroup: "adult", sensitivity: "general" });
   const [question, setQuestion] = useState("");
+  const [askedQuestion, setAskedQuestion] = useState("");
   const [answer, setAnswer] = useState("");
+  const [evidence, setEvidence] = useState<string[]>([]);
+  const [hypothetical, setHypothetical] = useState<WindHypothetical | null>(null);
   const [thinking, setThinking] = useState(false);
   const [mode, setMode] = useState("");
   const [decision, setDecision] = useState<ExposureDecision | null>(null);
@@ -317,11 +320,11 @@ function App() {
     assistantAbortRef.current?.abort();
     const controller = new AbortController();
     assistantAbortRef.current = controller;
-    setThinking(true); setAnswer(""); setAssistantError(""); setDecision(null); setMode("");
+    setThinking(true); setAnswer(""); setEvidence([]); setHypothetical(null); setAssistantError(""); setDecision(null); setMode(""); setAskedQuestion(q.trim());
     try {
       const result = await askAssistant(q, profile, { lat: loc.lat, lon: loc.lon }, controller.signal);
       if (!isLatestRequest(requestId, assistantRequestRef.current)) return;
-      setAnswer(result.answer); setMode(result.mode); setDecision(result.decision || null);
+      setAnswer(result.answer); setEvidence(result.evidence || []); setHypothetical(result.hypothetical || null); setMode(result.mode); setDecision(result.decision || null);
     } catch (e) {
       if (controller.signal.aborted) return;
       if (isLatestRequest(requestId, assistantRequestRef.current)) {
@@ -523,7 +526,14 @@ function App() {
             {decision.activityRecommendation !== "suitable" && <p className="decision-alt"><b>Alternative:</b> {decision.alternativeActivity}</p>}
             <p className="decision-limitations">{decision.limitations}</p>
           </div>}
-          {answer && <div className="answer-box" ref={assistantResultRef} tabIndex={-1}><div className="answer-title"><Bot size={16}/> AirSense says <span>{mode === "ai" ? "GENERATIVE AI" : "SAFETY ENGINE"}</span></div><p>{answer}</p></div>}
+          {(askedQuestion || answer) && <div className="answer-box" ref={assistantResultRef} tabIndex={-1}>
+            <div className="answer-title"><Bot size={16}/> AirSense says <span>{mode === "ai" ? "GENERATIVE AI" : "SAFETY ENGINE"}</span></div>
+            {askedQuestion && <p className="asked-question"><b>You asked.</b> {askedQuestion}</p>}
+            {answer && <p className="ai-explanation">{answer}</p>}
+            {mode === "ai" && evidence.length > 0 && <div className="evidence-block"><b>Evidence from the current reading</b><ul>{evidence.map((item) => <li key={item}>{item}</li>)}</ul></div>}
+            {hypothetical && <div className="hypothetical-block"><b>{hypothetical.label}</b><p>{hypothetical.note} Assumed wind {hypothetical.assumedWindSpeedKmh} km/h would be {hypothetical.activityRecommendation.replace(/_/g, " ")}. {hypothetical.recommendedAction}</p><p>{hypothetical.windDisclosure}</p></div>}
+            {decision?.trace && <DecisionTracePanel trace={decision.trace} />}
+          </div>}
           {assistantError && <div className="assistant-error" ref={assistantResultRef} tabIndex={-1} role="alert"><b>Assistant unavailable</b><span>{assistantError}</span></div>}
           <form className="chat-input" onSubmit={e => {e.preventDefault(); submit();}}><input value={question} onChange={e => setQuestion(e.target.value)} disabled={thinking || !air} placeholder={air ? "Ask about air quality, activities or precautions…" : "Load environmental data to ask a question"} aria-label="Ask AirSense AI"/><button disabled={thinking || !air || !question.trim()} aria-label="Send question">{thinking ? <RefreshCw className="spin" size={17}/> : <Send size={17}/>}</button></form>
           <div className="disclaimer">Guidance is informational, not medical advice. Follow local public-health advisories.</div>
@@ -534,6 +544,24 @@ function App() {
     </main>
   </div>;
 }
+function DecisionTracePanel({ trace }: { trace: DecisionTrace }) {
+  return <details className="decision-trace">
+    <summary>How AirSense reached this result</summary>
+    <dl>
+      <div><dt>US AQI</dt><dd>{trace.airQuality.value === null ? "Unavailable" : `${trace.airQuality.value} · ${trace.airQuality.category}`}</dd></div>
+      <div><dt>PM2.5</dt><dd>{trace.pm25.value === null ? "Unavailable" : `${trace.pm25.value} µg/m³ · ${trace.pm25.category}`}</dd></div>
+      <div><dt>Weather</dt><dd>{trace.weather.freshnessState} · {trace.weather.windSpeedKmh === null ? "wind unavailable" : `${trace.weather.windSpeedKmh} km/h`}</dd></div>
+      <div><dt>Wind score</dt><dd>{trace.wind.disclosure}</dd></div>
+      <div><dt>Profile</dt><dd>{trace.profile.activity} · {trace.profile.ageGroup} · {trace.profile.sensitivity}</dd></div>
+      {trace.scoringApplied && trace.factors.map((factor) => <div key={factor.factor}><dt>{factor.factor}</dt><dd>{factor.detail} Effect {factor.contribution}.</dd></div>)}
+      {trace.vigorousUnhealthyFloor && <div><dt>Activity floor</dt><dd>Unhealthy air with vigorous activity cannot score below avoid.</dd></div>}
+      {trace.floorApplied && <div><dt>Category floor</dt><dd>The US AQI category raised the recommendation to {trace.categoryFloor}.</dd></div>}
+      <div><dt>Result</dt><dd>{trace.result.overallRisk.replace(/_/g, " ")} · {trace.result.activityRecommendation.replace(/_/g, " ")}. {trace.result.recommendedAction}</dd></div>
+      {trace.unavailable.map((item) => <div key={item}><dt>Unavailable</dt><dd>{item}</dd></div>)}
+    </dl>
+  </details>;
+}
+
 function Pollutant({name,value,unit,icon,desc}:{name:string;value:number|null|undefined;unit:string;icon:React.ReactNode;desc:string}) {
   return <div className="pollutant-card"><div className="pollutant-top"><span className="pollutant-icon">{icon}</span><span className="muted">{desc}</span></div><div className="pollutant-value">{value == null ? "—" : Number(value).toFixed(1)} <small>{unit}</small></div><b>{name}</b></div>;
 }

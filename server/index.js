@@ -4,7 +4,7 @@ import dotenv from "dotenv";
 import helmet from "helmet";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { getAQIStatus, buildRecommendationContext, buildExposureDecision } from "./logic.js";
+import { getAQIStatus, buildRecommendationContext, buildExposureDecision, parseWindHypothetical, buildWindHypothetical } from "./logic.js";
 import { askGemini } from "./gemini.js";
 import { providerTimeToEpochMs, providerTimeToIso, selectCurrentAndFutureHours } from "./time.js";
 import { findGoWindows, TIME_PREFERENCES } from "./gowindow.js";
@@ -463,13 +463,18 @@ app.post("/api/assistant", rateLimiters.assistant.middleware, async (req, res) =
     });
   }
 
-  const decision = buildExposureDecision(trusted, profile);
+  const evaluatedAt = Date.now();
+  const decision = buildExposureDecision(trusted, profile, evaluatedAt);
   const context = buildRecommendationContext(trusted, profile, question, decision);
-  const result = await askGemini(question, context, trusted, decision);
+  const assumedWind = parseWindHypothetical(question);
+  const hypothetical = assumedWind === null ? null : buildWindHypothetical(trusted, profile, assumedWind, evaluatedAt);
+  const result = await askGemini(question, context, trusted, decision, { hypothetical });
   return res.json({
     answer: result.answer,
+    evidence: result.evidence || [],
     mode: result.mode,
     decision,
+    ...(hypothetical ? { hypothetical } : {}),
     ...(result.structured ? { structured: result.structured } : {}),
     ...(result.note ? { note: result.note } : {}),
     context,

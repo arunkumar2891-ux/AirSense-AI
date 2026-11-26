@@ -64,6 +64,14 @@ const context = {
 };
 const profile = { activity: "running", ageGroup: "adult", sensitivity: "general" };
 
+function explanationFor(decision, topic = "this activity") {
+  const recommendation = String(decision.activityRecommendation).replaceAll("_", " ");
+  if (decision.activityRecommendation === "insufficient_data") {
+    return `The question about ${topic} cannot be answered with a current activity recommendation because the reading is incomplete. Check a local monitoring station before spending time outdoors.`;
+  }
+  return `For the question about ${topic}, the activity recommendation is ${recommendation}. Use the evidence list for the current measurements and do not treat this sentence as a new reading.`;
+}
+
 function armValidClaims(air = trusted, selectedProfile = profile, now) {
   const decision = buildExposureDecision(air, selectedProfile, now);
   const claims = buildExplanationClaims(air, decision);
@@ -71,6 +79,7 @@ function armValidClaims(air = trusted, selectedProfile = profile, now) {
   mockBehavior.body = {
     recommendation: decision.activityRecommendation,
     claimIds: claims.map((claim) => claim.id),
+    explanation: explanationFor(decision),
   };
   return { decision, claims, context: deterministicContext, air };
 }
@@ -98,15 +107,17 @@ test("valid claim IDs and the matching recommendation are assembled from server 
   };
   const { decision, claims, context: deterministicContext } = armValidClaims(air, profile, now);
   const selected = ["wind_adjustment", "us_aqi"];
-  mockBehavior.body = { recommendation: decision.activityRecommendation, claimIds: selected };
+  const explanation = explanationFor(decision, "running now");
+  mockBehavior.body = { recommendation: decision.activityRecommendation, claimIds: selected, explanation };
   const result = await askGemini("Can I run?", deterministicContext, air, decision);
   const text = new Map(claims.map((claim) => [claim.id, claim.text]));
   assert.equal(result.mode, "ai");
-  assert.deepEqual(result.structured, { recommendation: decision.activityRecommendation, claimIds: selected });
-  assert.equal(result.answer, selected.map((id) => text.get(id)).join(" "));
+  assert.deepEqual(result.structured, { recommendation: decision.activityRecommendation, claimIds: selected, explanation });
+  assert.equal(result.answer, explanation);
+  assert.deepEqual(result.evidence, selected.map((id) => text.get(id)));
   assert.equal(text.get("wind_adjustment"), decision.wind.disclosure);
-  assert.match(result.answer, /increased the exposure score by 0\.5 points/);
-  assert.doesNotMatch(result.answer, /AI explanation|summary|favorable wind/i);
+  assert.match(result.evidence.join(" "), /increased the exposure score by 0\.5 points/);
+  assert.doesNotMatch(result.answer, /0\.5|favorable wind/i);
   assert.equal(deterministicContext.answer, buildDeterministicAnswer(air, decision));
 });
 
@@ -469,11 +480,11 @@ test("missing PM2.5 and wind are omitted from claims and cannot be described as 
   const rejected = await askGemini("Can I run?", deterministicContext, air, decision);
   assert.equal(rejected.answer, deterministicContext.answer);
 
-  mockBehavior.body = { recommendation: decision.activityRecommendation, claimIds: ["us_aqi", "wind_excluded"] };
+  mockBehavior.body = { recommendation: decision.activityRecommendation, claimIds: ["us_aqi", "wind_excluded"], explanation: explanationFor(decision, "today") };
   const accepted = await askGemini("Can I run?", deterministicContext, air, decision);
   assert.equal(accepted.mode, "ai");
   assert.equal(accepted.answer.includes("PM2.5"), false);
-  assert.match(accepted.answer, /Wind was unavailable and was not used/);
+  assert.match(accepted.evidence.join(" "), /Wind was unavailable and was not used/);
   assert.equal(lastPrompt.includes("windSpeedKmh"), false);
   assert.equal(lastPrompt.includes("wind_speed_10m"), false);
 });
@@ -502,4 +513,153 @@ test("timeout, malformed JSON, and a conflicting recommendation keep the determi
   assert.equal(conflict.mode, "rules-fallback");
   assert.equal(conflict.answer, buildDeterministicAnswer(air, decision));
   assert.match(conflict.note, /deterministic exposure recommendation/);
+});
+
+test("two different questions receive different explanations for the same readings", async () => {
+  const air = modelledAir({ weather: { wind_speed_10m: 8 } });
+  const decision = buildExposureDecision(air, profile, NOW);
+  const deterministicContext = buildRecommendationContext(air, profile, "Why does PM2.5 matter?", decision);
+  const claimIds = buildExplanationClaims(air, decision).map((claim) => claim.id);
+  const recommendation = decision.activityRecommendation.replaceAll("_", " ");
+  const pm = `PM2.5 matters because these fine particles can travel deep into the lungs and stay there longer than larger dust. The activity recommendation is ${recommendation}. The evidence list holds the current measurement.`;
+  const children = `Children should shorten strenuous outdoor play and watch for coughing or wheezing, because smaller bodies breathe more for their size. The activity recommendation is ${recommendation}. The evidence list holds the current measurement.`;
+  mockBehavior.body = { recommendation: decision.activityRecommendation, claimIds, explanation: pm };
+  const first = await askGemini("Why does PM2.5 matter?", deterministicContext, air, decision);
+  mockBehavior.body = { recommendation: decision.activityRecommendation, claimIds, explanation: children };
+  const second = await askGemini("What precautions should children take?", deterministicContext, air, decision);
+  assert.equal(first.mode, "ai");
+  assert.equal(second.mode, "ai");
+  assert.notEqual(first.answer, second.answer);
+  assert.match(first.answer, /PM2\.5 matters/);
+  assert.match(second.answer, /Children should shorten/);
+  assert.deepEqual(first.decision, decision);
+  assert.deepEqual(second.decision, decision);
+});
+
+test("a current-reading explanation uses trusted evidence and does not restate measurements", async () => {
+  const air = modelledAir({ weather: { wind_speed_10m: 8 } });
+  const decision = buildExposureDecision(air, profile, NOW);
+  const deterministicContext = buildRecommendationContext(air, profile, "Explain today's pollution levels", decision);
+  const claimIds = ["us_aqi", "pm25"];
+  const explanation = `Today's pollution should be read from the evidence list rather than restated here. The activity recommendation is ${decision.activityRecommendation.replaceAll("_", " ")}. Larger particles and gases are separate from the fine-particle category.`;
+  mockBehavior.body = { recommendation: decision.activityRecommendation, claimIds, explanation };
+  const result = await askGemini("Explain today's pollution levels", deterministicContext, air, decision);
+  assert.equal(result.mode, "ai");
+  assert.equal(result.answer.includes(String(air.aqi)), false);
+  assert.equal(result.answer.includes(String(air.pollutants.pm25)), false);
+  assert.match(result.evidence.join(" "), new RegExp(String(air.aqi)));
+  assert.match(result.evidence.join(" "), new RegExp(String(air.pollutants.pm25)));
+});
+
+test("a matching recommendation with a fabricated current reading is discarded", async () => {
+  const air = modelledAir();
+  const decision = buildExposureDecision(air, profile, NOW);
+  const deterministicContext = buildRecommendationContext(air, profile, "Explain today's pollution levels", decision);
+  mockBehavior.body = {
+    recommendation: decision.activityRecommendation,
+    claimIds: ["us_aqi"],
+    explanation: "The current PM2.5 reading is twelve and should be treated as the exact outdoor concentration for this hour.",
+  };
+  const result = await askGemini("Explain today's pollution levels", deterministicContext, air, decision);
+  assert.equal(result.mode, "rules-fallback");
+  assert.equal(result.answer, deterministicContext.answer);
+  assert.equal(result.answer.includes("twelve"), false);
+  assert.deepEqual(result.evidence, []);
+  assert.deepEqual(result.decision, decision);
+});
+
+test("insufficient data plus a favorable generated explanation is discarded", async () => {
+  const air = modelledAir({ retrievedAt: "2026-11-25T16:00:00.000Z" });
+  const decision = buildExposureDecision(air, profile, NOW);
+  assert.equal(decision.activityRecommendation, "insufficient_data");
+  const deterministicContext = buildRecommendationContext(air, profile, "Can we go outside?", decision);
+  mockBehavior.body = {
+    recommendation: "insufficient_data",
+    claimIds: ["insufficient_data"],
+    explanation: "It is safe and suitable for a long outdoor run even though part of the reading is missing from the provider.",
+  };
+  const result = await askGemini("Can we go outside?", deterministicContext, air, decision);
+  assert.equal(result.mode, "rules-fallback");
+  assert.equal(result.answer, deterministicContext.answer);
+  assert.match(result.note, /could not be validated|discarded/i);
+  assert.equal(result.decision.activityRecommendation, "insufficient_data");
+});
+
+test("stale weather and excluded wind cannot be described as current", async () => {
+  const air = modelledAir({ weatherRetrievedAt: "2026-11-25T17:00:00.000Z" });
+  const decision = buildExposureDecision(air, profile, NOW);
+  assert.equal(decision.wind.state, "excluded_stale");
+  const deterministicContext = buildRecommendationContext(air, profile, "How does wind affect outdoor pollution?", decision);
+  mockBehavior.body = {
+    recommendation: decision.activityRecommendation,
+    claimIds: ["wind_excluded"],
+    explanation: "The breeze is dispersing pollution right now, so this hour is comfortable for a walk around the neighborhood.",
+  };
+  const result = await askGemini("How does wind affect outdoor pollution?", deterministicContext, air, decision);
+  assert.equal(result.mode, "rules-fallback");
+  assert.equal(result.answer, deterministicContext.answer);
+  assert.equal(result.decision.wind.state, "excluded_stale");
+});
+
+test("an unsupported qualitative claim about current conditions is discarded", async () => {
+  const air = modelledAir();
+  const decision = buildExposureDecision(air, profile, NOW);
+  const deterministicContext = buildRecommendationContext(air, profile, "Explain today's pollution levels", decision);
+  mockBehavior.body = {
+    recommendation: decision.activityRecommendation,
+    claimIds: ["us_aqi"],
+    explanation: "The air is pristine and pollution-free, so there is nothing further to consider before going outdoors.",
+  };
+  const result = await askGemini("Explain today's pollution levels", deterministicContext, air, decision);
+  assert.equal(result.mode, "rules-fallback");
+  assert.equal(result.answer, buildDeterministicAnswer(air, decision));
+});
+
+test("an invalid explanation falls back while a timeout and malformed response do the same", async () => {
+  const air = modelledAir({ weather: { wind_speed_10m: 12 } });
+  const decision = buildExposureDecision(air, profile, NOW);
+  const deterministicContext = buildRecommendationContext(air, profile, "Why caution?", decision);
+  mockBehavior.body = { recommendation: decision.activityRecommendation, claimIds: ["us_aqi"], explanation: "Too short." };
+  const invalid = await askGemini("Why caution?", deterministicContext, air, decision);
+  assert.equal(invalid.mode, "rules-fallback");
+  assert.equal(invalid.answer, deterministicContext.answer);
+
+  mockBehavior = { type: "timeout" };
+  const timedOut = await askGemini("Why caution?", deterministicContext, air, decision);
+  assert.equal(timedOut.mode, "rules-fallback");
+  assert.equal(timedOut.structured, null);
+
+  mockBehavior = { type: "invalid" };
+  const malformed = await askGemini("Why caution?", deterministicContext, air, decision);
+  assert.equal(malformed.mode, "rules-fallback");
+  assert.equal(malformed.answer, deterministicContext.answer);
+});
+
+test("a hypothetical wind question does not replace the current decision", async () => {
+  const air = modelledAir({
+    aqi: 101,
+    pollutants: { pm25: 8 },
+    weather: { wind_speed_10m: 12 },
+  });
+  const child = { activity: "running", ageGroup: "child", sensitivity: "general" };
+  const decision = buildExposureDecision(air, child, NOW);
+  const { buildWindHypothetical } = await import("./logic.js");
+  const hypothetical = buildWindHypothetical(air, child, 3, NOW);
+  const deterministicContext = buildRecommendationContext(air, child, "What if the wind speed were 3 km/h instead?", decision);
+  const explanation = `This is a hypothetical look at slower wind. The current activity recommendation is ${decision.activityRecommendation.replaceAll("_", " ")}, and the scenario recommendation is ${hypothetical.activityRecommendation.replaceAll("_", " ")}. It is not a retrieved wind measurement.`;
+  mockBehavior = {
+    type: "success",
+    body: {
+      recommendation: decision.activityRecommendation,
+      claimIds: ["wind_considered"],
+      explanation,
+    },
+  };
+  const result = await askGemini("What if the wind speed were 3 km/h instead?", deterministicContext, air, decision, { hypothetical });
+  assert.equal(result.mode, "ai");
+  assert.match(result.answer, /hypothetical/i);
+  assert.equal(result.decision.activityRecommendation, decision.activityRecommendation);
+  assert.notEqual(hypothetical.activityRecommendation, decision.activityRecommendation);
+  assert.equal(result.hypothetical.activityRecommendation, hypothetical.activityRecommendation);
+  assert.equal(result.decision.wind.windSpeedKmh, 12);
 });

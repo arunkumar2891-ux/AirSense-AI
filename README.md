@@ -2,7 +2,7 @@
 
 **Understand the air you have. Choose a time that fits the activity.**
 
-AirSense AI is a deterministic outdoor-exposure assistant. It turns modelled air-quality and weather data into an activity-specific recommendation for right now, and it uses the same rules to find later forecast windows for a chosen activity and duration. An optional Gemini call can only select explanation sentences the server has already written.
+AirSense AI is a deterministic outdoor-exposure assistant. It turns modelled air-quality and weather data into an activity-specific recommendation for right now, and it uses the same rules to find later forecast windows for a chosen activity and duration. An optional Gemini call can explain the user's question. It cannot replace the decision or the measurements.
 
 ## Project overview
 
@@ -143,10 +143,11 @@ Each window includes US AQI and PM2.5 ranges when known, weather ranges, a ranki
 
 ## Gemini architecture
 
-Gemini does not write environmental explanations. When `AI_API_KEY` is set, the server asks the Gemini SDK for JSON with two fields:
+When `AI_API_KEY` is set, the server asks the Gemini SDK for JSON with three fields:
 
 - `recommendation`: `suitable`, `caution`, `avoid`, or `insufficient_data`. It must equal the engine's `activityRecommendation`.
-- `claimIds`: IDs copied from the server-built `allowedClaims` list.
+- `claimIds`: IDs copied from the server-built `allowedClaims` list. These sentences stay server-authored evidence.
+- `explanation`: a question-specific answer. It may explain the topic, but it may not introduce a measurement, a number word, a different category, or a different recommendation.
 
 `buildExplanationClaims` creates a claim only when its source fact exists and its freshness state allows it. A claim whose fact is missing is not offered. The IDs are:
 
@@ -166,17 +167,20 @@ Gemini does not write environmental explanations. When `AI_API_KEY` is set, the 
 
 The server accepts a response only when all of these hold:
 
-- The object has no fields other than `recommendation` and `claimIds`.
+- The object has no fields other than `recommendation`, `claimIds`, and `explanation`.
 - The enum matches the deterministic recommendation exactly.
 - `claimIds` contains 1 to 12 unique IDs, each of which was offered for this decision.
+- The explanation stays within the length limit and does not add digits, number words, an unsupported current-condition claim, a mismatched category, a mismatched recommendation, excluded wind as a current fact, or an unlabeled hypothetical.
 
-The server then joins the sentences it authored for those IDs. Gemini cannot invent a measurement, a forecast, a street-level claim, or a different recommendation. Coordinates are not included in the prompt.
+A valid explanation is the assistant answer. The selected claim sentences are returned separately as evidence. The exposure decision card is unchanged. A server-built decision trace explains the inputs, scoring factors, wind treatment, and result. Gemini does not write that trace. Coordinates are not included in the prompt.
+
+A question of the form "what if the wind speed were 3 km/h" gets a separate hypothetical. The exposure engine scores that assumed speed. The response labels it hypothetical, and the current decision keeps the retrieved wind. Other hypotheticals are not recalculated.
 
 | Mode | When |
 |---|---|
 | `rules` | `AI_API_KEY` is unset. The deterministic answer is returned and Gemini is not called. |
-| `ai` | The enum and claim IDs validate. The answer is the server's sentences for the selected IDs. |
-| `rules-fallback` | The provider errors, times out, or returns an enum mismatch, an unknown claim, a duplicate, an extra field, or malformed JSON. The deterministic answer replaces the model output. |
+| `ai` | The enum, claim IDs, and explanation validate. The answer is the question-specific explanation, with server claim sentences as evidence. |
+| `rules-fallback` | The provider errors, times out, or returns an enum mismatch, an unknown claim, a duplicate, an extra field, an unsafe explanation, or malformed JSON. The generated explanation is discarded and the deterministic answer is returned. |
 
 The assistant calls the Gemini SDK only when `AI_API_KEY` is set. `AI_MODEL` selects that model's id and defaults to `gemini-3.8-flash`.
 
@@ -218,14 +222,14 @@ Express
   |-- GET  /api/geocode         city search
   |-- GET  /api/reverse-geocode generic GPS label if the browser lookup fails
   |-- POST /api/gowindow        forecast windows
-  |-- POST /api/assistant       deterministic decision, then optional Gemini claim IDs
+  |-- POST /api/assistant       deterministic decision and trace, then optional Gemini explanation
   |-- GET  /api/health
   v
 Open-Meteo air quality and forecast
   v
 server/logic.js  ->  recommendation
 server/gowindow.js  ->  window status
-server/gemini.js  ->  claim-ID selection, or rules / rules-fallback
+server/gemini.js  ->  validated explanation plus claim IDs, or rules / rules-fallback
 ```
 
 In production, Express serves the Vite build from `dist/` and the API on the same origin. The client calls relative `/api` routes, so the built frontend does not embed an API host. Development runs Vite at `http://localhost:5173` and proxies `/api` to `http://localhost:10000`.
@@ -253,7 +257,7 @@ npm run dev
 - App: `http://localhost:5173`
 - API: `http://localhost:10000`
 
-`npm run dev` runs the API and the Vite client together. An empty `AI_API_KEY` is a valid demo configuration. The variable names and defaults live in `.env.example`. Fill in `AI_API_KEY` only if you want Gemini to select claim IDs.
+`npm run dev` runs the API and the Vite client together. An empty `AI_API_KEY` is a valid demo configuration. The variable names and defaults live in `.env.example`. Fill in `AI_API_KEY` only if you want Gemini to write a validated explanation.
 
 ## Test and build
 
@@ -283,7 +287,7 @@ NODE_ENV=production npm start
 4. Start command: `npm start`
 5. Health check path: `/api/health`
 6. Set `NODE_ENV` to `production`. The Blueprint does this. A manual service needs the same variable, because production CORS and proxy trust depend on it.
-7. Set `AI_API_KEY` if Gemini claim selection should run. `AI_MODEL` is optional and defaults to `gemini-3.8-flash`. Leave the key unset to serve the deterministic assistant. Do not put secrets in GitHub.
+7. Set `AI_API_KEY` if the validated Gemini explanation should run. `AI_MODEL` is optional and defaults to `gemini-3.8-flash`. Leave the key unset to serve the deterministic assistant. Do not put secrets in GitHub.
 8. Deploy.
 
 Render supplies `PORT`. The server binds `0.0.0.0`. Optional rate-limit, cache, and `ALLOWED_ORIGINS` variables are listed in `.env.example`.
