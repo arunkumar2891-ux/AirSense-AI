@@ -1,4 +1,4 @@
-import test from "node:test";
+import test, { describe } from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
@@ -92,6 +92,7 @@ function goWindowBody(overrides = {}) {
   };
 }
 
+describe("GoWindow route", { concurrency: 1 }, () => {
 test.beforeEach(() => {
   upstreamCalls = [];
   providerMode = "suitable";
@@ -292,4 +293,5 @@ test("GoWindow route does not call Gemini", async () => {
   assert.match(route, /fetchTrustedForecast/);
   assert.match(route, /timePreference/);
   assert.doesNotMatch(route, /askGemini/);
+});
 });

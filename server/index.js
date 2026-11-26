@@ -1,6 +1,6 @@
+import "./env.js";
 import express from "express";
 import cors from "cors";
-import dotenv from "dotenv";
 import helmet from "helmet";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,8 +11,6 @@ import { findGoWindows, TIME_PREFERENCES } from "./gowindow.js";
 import { buildForecastMetadata } from "./metadata.js";
 import { BoundedTTLCache, normalizeCoordinates } from "./cache.js";
 import { createRateLimiter } from "./rate-limit.js";
-
-dotenv.config();
 
 const IS_PRODUCTION = process.env.NODE_ENV === "production";
 const app = express();
@@ -69,28 +67,116 @@ app.use(cors((req, cb) => {
 
 app.use(express.json({ limit: "30kb" }));
 
-// ---------- Upstream data cache (reused by air-quality + assistant) ----------
+// ---------- Upstream caches ----------
+// Environmental readings and place search are independent. Filling one cache
+// must not evict the other. CACHE_MAX_ENTRIES remains the environmental bound.
+// GEOCODE_CACHE_MAX_ENTRIES overrides only the geocoding bound; when unset,
+// geocoding keeps the same capacity number as the environmental cache.
 const CACHE_MAX_ENTRIES = Math.max(10, Number(process.env.CACHE_MAX_ENTRIES) || 500);
+const GEOCODE_CACHE_MAX_ENTRIES = Math.max(10, Number(process.env.GEOCODE_CACHE_MAX_ENTRIES) || CACHE_MAX_ENTRIES);
 const ENVIRONMENT_CACHE_TTL_MS = Math.max(1000, Number(process.env.ENVIRONMENT_CACHE_TTL_MS) || 10 * 60 * 1000);
 const GEOCODE_CACHE_TTL_MS = Math.max(1000, Number(process.env.GEOCODE_CACHE_TTL_MS) || 24 * 60 * 60 * 1000);
 const cache = new BoundedTTLCache({ maxEntries: CACHE_MAX_ENTRIES });
+const geocodeCache = new BoundedTTLCache({ maxEntries: GEOCODE_CACHE_MAX_ENTRIES });
 
-async function cachedFetchRecord(url, ttlMs = ENVIRONMENT_CACHE_TTL_MS) {
+async function loadCachedRecord(store, url, ttlMs = ENVIRONMENT_CACHE_TTL_MS, accept = null) {
   const key = String(url);
-  return cache.getOrLoad(key, ttlMs, async () => {
+  return store.getOrLoad(key, ttlMs, async () => {
     const response = await fetch(key, {
       headers: { "User-Agent": "AirSenseAI/1.0" },
       signal: AbortSignal.timeout(10000),
     });
     if (!response.ok) throw new Error(`Data provider returned ${response.status}`);
     const data = await response.json();
-    return { data, retrievedAt: new Date().toISOString() };
+    const record = { data, retrievedAt: new Date().toISOString() };
+    if (accept && !accept(record)) throw new Error("Invalid provider response shape");
+    return record;
   });
 }
 
-async function cachedFetch(url, ttlMs = ENVIRONMENT_CACHE_TTL_MS) {
-  const record = await cachedFetchRecord(url, ttlMs);
+async function cachedFetchRecord(url, ttlMs = ENVIRONMENT_CACHE_TTL_MS) {
+  return loadCachedRecord(cache, url, ttlMs);
+}
+
+async function cachedFetch(url, ttlMs = GEOCODE_CACHE_TTL_MS) {
+  const record = await loadCachedRecord(geocodeCache, url, ttlMs);
   return record.data;
+}
+
+function plainObject(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function omittedWeatherValue(value) {
+  return value === undefined || value === null;
+}
+
+function finiteJsonNumber(value) {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+// Wind is the only current-weather field the exposure score and decision trace
+// consume. Temperature, feels-like, and humidity are displayed when present.
+// weather_code is requested from the provider and is not used.
+function usableWindSpeed(value) {
+  return finiteJsonNumber(value) && value >= 0;
+}
+
+function usableCelsius(value) {
+  return finiteJsonNumber(value);
+}
+
+function usableHumidity(value) {
+  return finiteJsonNumber(value) && value >= 0 && value <= 100;
+}
+
+function optionalWeatherField(value, accept) {
+  return omittedWeatherValue(value) || accept(value);
+}
+
+function usableCurrentObservation(current) {
+  if (!plainObject(current)) return false;
+  if (!usableWindSpeed(current.wind_speed_10m)) return false;
+  if (!optionalWeatherField(current.temperature_2m, usableCelsius)) return false;
+  if (!optionalWeatherField(current.apparent_temperature, usableCelsius)) return false;
+  if (!optionalWeatherField(current.relative_humidity_2m, usableHumidity)) return false;
+  return true;
+}
+
+function optionalWeatherSeries(values, accept) {
+  if (omittedWeatherValue(values)) return true;
+  return Array.isArray(values) && values.every((value) => optionalWeatherField(value, accept));
+}
+
+// GoWindow reads hourly time, wind, temperature, and humidity. Current
+// observations on a forecast document are not required for that path.
+function usableHourlyForecast(hourly, utcOffsetSeconds) {
+  if (!plainObject(hourly) || !Array.isArray(hourly.time) || hourly.time.length === 0) return false;
+  const wind = hourly.wind_speed_10m;
+  if (!Array.isArray(wind) || !wind.every((value) => optionalWeatherField(value, usableWindSpeed))) return false;
+  if (!optionalWeatherSeries(hourly.temperature_2m, usableCelsius)) return false;
+  if (!optionalWeatherSeries(hourly.relative_humidity_2m, usableHumidity)) return false;
+  return hourly.time.some((time, index) =>
+    providerTimeToEpochMs(time, utcOffsetSeconds) !== null && usableWindSpeed(wind[index])
+  );
+}
+
+function usableCurrentWeatherRecord(record) {
+  const data = record?.data;
+  return plainObject(data) && usableCurrentObservation(data.current);
+}
+
+function usableForecastWeatherRecord(record) {
+  const data = record?.data;
+  return plainObject(data) && usableHourlyForecast(data.hourly, data.utc_offset_seconds);
+}
+
+async function settleRecord(url, ttlMs = ENVIRONMENT_CACHE_TTL_MS, accept = null) {
+  try {
+    return { ok: true, record: await loadCachedRecord(cache, url, ttlMs, accept) };
+  } catch (error) {
+    return { ok: false, error };
+  }
 }
 
 // ---------- Trusted environmental data ----------
@@ -132,15 +218,20 @@ function finiteNonNegative(value) {
 async function fetchTrustedEnvironmentalData(latitude, longitude) {
   const normalized = normalizeCoordinates(latitude, longitude);
   const { airUrl, weatherUrl } = buildAirUrls(normalized.latitude, normalized.longitude);
-  const [airRecord, weatherRecord] = await Promise.all([
-    cachedFetchRecord(airUrl),
-    cachedFetchRecord(weatherUrl),
+  const [airResult, weatherResult] = await Promise.all([
+    settleRecord(airUrl),
+    settleRecord(weatherUrl, ENVIRONMENT_CACHE_TTL_MS, usableCurrentWeatherRecord),
   ]);
+  if (!airResult.ok) throw airResult.error;
+  const airRecord = airResult.record;
   const air = airRecord?.data;
-  const weather = weatherRecord?.data;
-  if (!air || typeof air !== "object" || !weather || typeof weather !== "object") {
-    throw new Error("Invalid provider response shape");
-  }
+  if (!plainObject(air)) throw new Error("Invalid provider response shape");
+  // Weather is optional. A failure, timeout, or unusable payload leaves wind
+  // unavailable. It is not replaced with a fabricated value or with the
+  // air-quality retrieval time.
+  const weatherRecord = weatherResult.ok ? weatherResult.record : null;
+  const weather = weatherRecord ? weatherRecord.data.current : {};
+  const weatherRetrievedAt = weatherRecord ? weatherRecord.retrievedAt ?? null : null;
   const current = air.current || {};
   const rawAqi = current.us_aqi == null ? NaN : Number(current.us_aqi);
   const aqi = Number.isFinite(rawAqi) && rawAqi >= 0 ? rawAqi : null;
@@ -168,8 +259,8 @@ async function fetchTrustedEnvironmentalData(latitude, longitude) {
       ozone: finiteNonNegative(current.ozone), nitrogenDioxide: finiteNonNegative(current.nitrogen_dioxide),
       carbonMonoxide: finiteNonNegative(current.carbon_monoxide), sulphurDioxide: finiteNonNegative(current.sulphur_dioxide),
     },
-    weather: weather.current || {},
-    weatherRetrievedAt: weatherRecord.retrievedAt ?? null,
+    weather,
+    weatherRetrievedAt,
     hourly: hours,
     source: "Open-Meteo / CAMS",
     attribution: "Air quality estimates are model-based and may differ from local regulatory monitoring stations.",
@@ -231,9 +322,11 @@ async function fetchTrustedForecast(latitude, longitude) {
   const normalized = normalizeCoordinates(latitude, longitude);
   const { airUrl } = buildAirUrls(normalized.latitude, normalized.longitude);
   const weatherUrl = buildForecastWeatherUrl(normalized.latitude, normalized.longitude);
+  // GoWindow still requires both sources. A weather failure rejects the forecast
+  // rather than producing a window from air quality alone.
   const [airRecord, weatherRecord] = await Promise.all([
     cachedFetchRecord(airUrl),
-    cachedFetchRecord(weatherUrl),
+    loadCachedRecord(cache, weatherUrl, ENVIRONMENT_CACHE_TTL_MS, usableForecastWeatherRecord),
   ]);
   const air = airRecord?.data;
   const weather = weatherRecord?.data;
@@ -469,15 +562,16 @@ app.post("/api/assistant", rateLimiters.assistant.middleware, async (req, res) =
   const assumedWind = parseWindHypothetical(question);
   const hypothetical = assumedWind === null ? null : buildWindHypothetical(trusted, profile, assumedWind, evaluatedAt);
   const result = await askGemini(question, context, trusted, decision, { hypothetical });
+  const answered = result.mode === "ai" || result.mode === "rules" || result.mode === "rules-fallback";
   return res.json({
     answer: result.answer,
     evidence: result.evidence || [],
     mode: result.mode,
     decision,
-    ...(hypothetical ? { hypothetical } : {}),
+    ...(answered && hypothetical ? { hypothetical } : {}),
     ...(result.structured ? { structured: result.structured } : {}),
     ...(result.note ? { note: result.note } : {}),
-    context,
+    ...(answered ? { context } : {}),
   });
 });
 
@@ -511,8 +605,11 @@ export {
   fetchTrustedForecast,
   cachedFetch,
   cache,
+  geocodeCache,
   CACHE_MAX_ENTRIES,
+  GEOCODE_CACHE_MAX_ENTRIES,
   ENVIRONMENT_CACHE_TTL_MS,
+  GEOCODE_CACHE_TTL_MS,
   rateBuckets,
   rateLimiters,
   RATE_LIMIT_MAX,

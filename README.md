@@ -143,7 +143,11 @@ Each window includes US AQI and PM2.5 ranges when known, weather ranges, a ranki
 
 ## Gemini architecture
 
-When `AI_API_KEY` is set, the server asks the Gemini SDK for JSON with three fields:
+An obvious instruction override, prompt extraction, or credential request is declined before Gemini is called. The same local gate also recognizes clearly environmental, clearly unrelated, and ambiguous questions. It runs when no API key is configured and whenever the Gemini classifier fails, so an unrelated question is not answered with the exposure paragraph. Ambiguous questions receive a fixed request for a more specific environmental question.
+
+When a key is configured, clearly unrelated and ambiguous questions are still decided locally and are not sent to Gemini. Other questions are also classified by Gemini at temperature 0, with the question passed as data and with no tools. The classifier returns `environmental`, `mixed`, or `unrelated`. An unrelated result is declined. A span is sent to the explainer only when it is an exact contiguous substring of the normalized question and the local gate still calls that span environmental. The server adds its own sentence when part of the request was left unanswered. If classification times out or the JSON is unusable, the explainer is not called and the local gate decides. An explanation that discloses the system prompt, an API key, or internal configuration is discarded.
+
+When a question is accepted and `AI_API_KEY` is set, the server asks the Gemini SDK for JSON with three fields:
 
 - `recommendation`: `suitable`, `caution`, `avoid`, or `insufficient_data`. It must equal the engine's `activityRecommendation`.
 - `claimIds`: IDs copied from the server-built `allowedClaims` list. These sentences stay server-authored evidence.
@@ -178,9 +182,11 @@ A question of the form "what if the wind speed were 3 km/h" gets a separate hypo
 
 | Mode | When |
 |---|---|
-| `rules` | `AI_API_KEY` is unset. The deterministic answer is returned and Gemini is not called. |
-| `ai` | The enum, claim IDs, and explanation validate. The answer is the question-specific explanation, with server claim sentences as evidence. |
-| `rules-fallback` | The provider errors, times out, or returns an enum mismatch, an unknown claim, a duplicate, an extra field, an unsafe explanation, or malformed JSON. The generated explanation is discarded and the deterministic answer is returned. |
+| `rules` | No API key, and the local gate finds a clearly environmental question. The deterministic answer is returned and Gemini is not called. |
+| `ai` | Gemini accepts an environmental question, or a mixed question had a valid environmental substring, and the enum, claim IDs, and explanation validate. |
+| `rules-fallback` | The explainer fails, or the Gemini classifier fails and the local gate still finds the question environmental. The deterministic answer is returned. |
+| `declined` | The question is an obvious injection, clearly unrelated, or a mixed question whose environmental substring cannot be isolated. The answer is a fixed refusal. No current-reading evidence is attached. |
+| `ambiguous` | The question has no clear environmental or unrelated intent. The answer asks for a more specific environmental question. |
 
 The assistant calls the Gemini SDK only when `AI_API_KEY` is set. `AI_MODEL` selects that model's id and defaults to `gemini-3.8-flash`.
 

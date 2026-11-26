@@ -526,8 +526,8 @@ function App() {
             {decision.activityRecommendation !== "suitable" && <p className="decision-alt"><b>Alternative:</b> {decision.alternativeActivity}</p>}
             <p className="decision-limitations">{decision.limitations}</p>
           </div>}
-          {(askedQuestion || answer) && <div className="answer-box" ref={assistantResultRef} tabIndex={-1}>
-            <div className="answer-title"><Bot size={16}/> AirSense says <span>{mode === "ai" ? "GENERATIVE AI" : "SAFETY ENGINE"}</span></div>
+          {(askedQuestion || answer) && <div className={`answer-box${mode === "declined" ? " declined" : mode === "ambiguous" ? " ambiguous" : mode === "classification-unavailable" ? " unavailable" : ""}`} ref={assistantResultRef} tabIndex={-1}>
+            <div className="answer-title"><Bot size={16}/> AirSense says <span>{mode === "ai" ? "GENERATIVE AI" : mode === "declined" ? "OUT OF SCOPE" : mode === "ambiguous" ? "CLARIFICATION" : mode === "classification-unavailable" ? "EXPLANATION UNAVAILABLE" : "SAFETY ENGINE"}</span></div>
             {askedQuestion && <p className="asked-question"><b>You asked.</b> {askedQuestion}</p>}
             {answer && <p className="ai-explanation">{answer}</p>}
             {mode === "ai" && evidence.length > 0 && <div className="evidence-block"><b>Evidence from the current reading</b><ul>{evidence.map((item) => <li key={item}>{item}</li>)}</ul></div>}
