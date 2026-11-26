@@ -12,11 +12,18 @@ function at(offsetHours) {
 }
 
 function forecast(hourly, overrides = {}) {
+  // A fixture that names only one retrieval time is stating that both sources
+  // were retrieved then. Production code never copies one timestamp onto the other.
+  const has = (key) => Object.prototype.hasOwnProperty.call(overrides, key);
+  const airRetrievedAt = has("airRetrievedAt") ? overrides.airRetrievedAt : has("retrievedAt") ? overrides.retrievedAt : at(0);
+  const weatherRetrievedAt = has("weatherRetrievedAt") ? overrides.weatherRetrievedAt : airRetrievedAt;
   return {
     timezone: "Asia/Kolkata",
-    issuedAt: at(0),
     hourly,
     ...overrides,
+    airRetrievedAt,
+    weatherRetrievedAt,
+    retrievedAt: airRetrievedAt,
   };
 }
 
@@ -129,7 +136,7 @@ test("a stale forecast produces no scheduling decision", () => {
     [0, 1].map((offset) => hour(offset, { aqi: 20, pm25: 5 })),
     runner,
     60,
-    { issuedAt: new Date(NOW - 4 * HOUR).toISOString() },
+    { retrievedAt: new Date(NOW - 4 * HOUR).toISOString() },
   );
   assert.equal(result.status, "insufficient_data");
   assert.equal(result.forecastFreshness.state, "stale");
@@ -187,7 +194,9 @@ test("daylight-saving transitions use absolute hourly instants", () => {
   const fallback = findGoWindows({
     forecast: {
       timezone: "America/New_York",
-      issuedAt: "2026-11-01T05:00:00.000Z",
+      airRetrievedAt: "2026-11-01T05:00:00.000Z",
+      weatherRetrievedAt: "2026-11-01T05:00:00.000Z",
+      retrievedAt: "2026-11-01T05:00:00.000Z",
       hourly: [
         hour(0, { time: "2026-11-01T05:00:00.000Z" }),
         hour(1, { time: "2026-11-01T06:00:00.000Z" }),
@@ -206,7 +215,9 @@ test("daylight-saving transitions use absolute hourly instants", () => {
   const spring = findGoWindows({
     forecast: {
       timezone: "America/New_York",
-      issuedAt: "2026-03-08T06:00:00.000Z",
+      airRetrievedAt: "2026-03-08T06:00:00.000Z",
+      weatherRetrievedAt: "2026-03-08T06:00:00.000Z",
+      retrievedAt: "2026-03-08T06:00:00.000Z",
       hourly: [
         { time: "2026-03-08T06:00:00.000Z", aqi: 30, pm25: 8 },
         { time: "2026-03-08T07:00:00.000Z", aqi: 30, pm25: 8 },
@@ -222,7 +233,9 @@ test("daylight-saving transitions use absolute hourly instants", () => {
   const gap = findGoWindows({
     forecast: {
       timezone: "America/New_York",
-      issuedAt: "2026-11-01T05:00:00.000Z",
+      airRetrievedAt: "2026-11-01T05:00:00.000Z",
+      weatherRetrievedAt: "2026-11-01T05:00:00.000Z",
+      retrievedAt: "2026-11-01T05:00:00.000Z",
       hourly: [
         { time: "2026-11-01T05:00:00.000Z", aqi: 30, pm25: 8 },
         { time: "2026-11-01T07:00:00.000Z", aqi: 30, pm25: 8 },
@@ -302,7 +315,7 @@ test("GoWindow scheduling is deterministic and independent of Gemini", async () 
 });
 
 test("invalid forecast time, duration, and timezone-naive timestamps are rejected", () => {
-  const futureIssue = schedule([hour(1)], runner, 60, { issuedAt: new Date(NOW + HOUR).toISOString() });
+  const futureIssue = schedule([hour(1)], runner, 60, { retrievedAt: new Date(NOW + HOUR).toISOString() });
   assert.equal(futureIssue.status, "insufficient_data");
   assert.equal(futureIssue.forecastFreshness.state, "unknown");
 
@@ -343,7 +356,7 @@ function preferenceHours(startHour, endHour, betterHours = new Set()) {
 
 function preferenceSchedule({ timePreference, hourly, now, timezone = "Asia/Kolkata", durationMinutes = 60 }) {
   return findGoWindows({
-    forecast: { timezone, issuedAt: now, hourly },
+    forecast: { timezone, airRetrievedAt: now, weatherRetrievedAt: now, retrievedAt: now, hourly },
     profile: daily,
     durationMinutes,
     timePreference,
@@ -525,8 +538,109 @@ test("an invalid time preference does not invent a window", () => {
 });
 
 test("an aging forecast remains available and discloses its freshness", () => {
-  const result = schedule([hour(1), hour(2)], daily, 60, { issuedAt: new Date(NOW - 90 * 60 * 1000).toISOString() });
+  const result = schedule([hour(1), hour(2)], daily, 60, { retrievedAt: new Date(NOW - 90 * 60 * 1000).toISOString() });
   assert.equal(result.status, "suitable_windows");
   assert.equal(result.forecastFreshness.state, "aging");
   assert.match(result.windows[0].limitations, /may not reflect current conditions/i);
+});
+
+function scheduledWindows(result) {
+  return result.windows.map((window) => [window.start, window.end, window.placement, window.aqi, window.pm25, window.rankReason]);
+}
+
+test("air and weather retrieval times are gated independently and never substituted", () => {
+  const hours = [hour(1), hour(2), hour(3)];
+  const bothNow = { airRetrievedAt: at(0), weatherRetrievedAt: at(0) };
+  const baseline = schedule(hours, runner, 60, bothNow);
+  assert.equal(baseline.status, "suitable_windows");
+  assert.equal(baseline.sourceFreshness.air.state, "fresh");
+  assert.equal(baseline.sourceFreshness.weather.state, "fresh");
+  assert.equal(baseline.sourceFreshness.air.timestamp, at(0));
+  assert.equal(baseline.sourceFreshness.weather.timestamp, at(0));
+  assert.equal(baseline.sourceFreshness.air.modelRunAgeMs, null);
+  assert.doesNotMatch(baseline.sourceFreshness.weather.label, /model run/i);
+  assert.equal(baseline.freshnessPolicy.freshWithinMs, 30 * 60 * 1000);
+  assert.equal(baseline.freshnessPolicy.staleAfterMs, 3 * 60 * 60 * 1000);
+  assert.equal(baseline.freshnessPolicy.clockSkewToleranceMs, 5 * 60 * 1000);
+  assert.match(baseline.freshnessPolicy.note, /AirSense policy thresholds, not provider guarantees/);
+
+  const airRetrievedAt = new Date(NOW - 2 * 60 * 1000).toISOString();
+  const weatherRetrievedAt = new Date(NOW - 20 * 60 * 1000).toISOString();
+  const different = schedule(hours, runner, 60, { airRetrievedAt, weatherRetrievedAt });
+  assert.equal(different.status, "suitable_windows");
+  assert.equal(different.sourceFreshness.air.timestamp, airRetrievedAt);
+  assert.equal(different.sourceFreshness.weather.timestamp, weatherRetrievedAt);
+  assert.equal(different.sourceFreshness.air.ageMs, 2 * 60 * 1000);
+  assert.equal(different.sourceFreshness.weather.ageMs, 20 * 60 * 1000);
+  assert.equal(different.forecastFreshness.timestamp, null);
+  assert.deepEqual(scheduledWindows(different), scheduledWindows(baseline));
+
+  const staleWeather = schedule(hours, runner, 60, { airRetrievedAt: at(0), weatherRetrievedAt: new Date(NOW - 4 * HOUR).toISOString() });
+  assert.equal(staleWeather.status, "insufficient_data");
+  assert.deepEqual(staleWeather.windows, []);
+  assert.equal(staleWeather.sourceFreshness.air.state, "fresh");
+  assert.equal(staleWeather.sourceFreshness.weather.state, "stale");
+  assert.match(staleWeather.reason, /Retrieved weather data is too old/);
+  assert.doesNotMatch(staleWeather.reason, /air-quality data is too old/);
+
+  const staleAir = schedule(hours, runner, 60, { airRetrievedAt: new Date(NOW - 4 * HOUR).toISOString(), weatherRetrievedAt: at(0) });
+  assert.equal(staleAir.status, "insufficient_data");
+  assert.deepEqual(staleAir.windows, []);
+  assert.equal(staleAir.sourceFreshness.air.state, "stale");
+  assert.equal(staleAir.sourceFreshness.weather.state, "fresh");
+  assert.match(staleAir.reason, /Retrieved air-quality data is too old/);
+  assert.doesNotMatch(staleAir.reason, /weather data is too old/);
+
+  for (const [key, value] of [
+    ["airRetrievedAt", null],
+    ["airRetrievedAt", ""],
+    ["airRetrievedAt", "not-a-time"],
+    ["weatherRetrievedAt", null],
+    ["weatherRetrievedAt", undefined],
+    ["weatherRetrievedAt", "not-a-time"],
+  ]) {
+    const result = schedule(hours, runner, 60, { ...bothNow, [key]: value });
+    assert.equal(result.status, "insufficient_data", `${key}=${String(value)}`);
+    assert.deepEqual(result.windows, []);
+    assert.match(result.reason, /retrieval time is missing, invalid, or in the future/);
+  }
+
+  const futureAir = schedule(hours, runner, 60, { airRetrievedAt: new Date(NOW + 30 * 60 * 1000).toISOString(), weatherRetrievedAt: at(0) });
+  assert.equal(futureAir.status, "insufficient_data");
+  assert.equal(futureAir.sourceFreshness.air.state, "unknown");
+  assert.equal(futureAir.sourceFreshness.weather.state, "fresh");
+  const futureWeather = schedule(hours, runner, 60, { airRetrievedAt: at(0), weatherRetrievedAt: new Date(NOW + HOUR).toISOString() });
+  assert.equal(futureWeather.status, "insufficient_data");
+  assert.equal(futureWeather.sourceFreshness.weather.state, "unknown");
+  assert.equal(futureWeather.sourceFreshness.air.state, "fresh");
+
+  const withinSkew = new Date(NOW + 4 * 60 * 1000).toISOString();
+  const skewed = schedule(hours, runner, 60, { airRetrievedAt: withinSkew, weatherRetrievedAt: withinSkew });
+  assert.equal(skewed.status, "suitable_windows");
+  assert.equal(skewed.sourceFreshness.air.ageMs, 0);
+  assert.equal(skewed.sourceFreshness.weather.ageMs, 0);
+  const beyondSkew = schedule(hours, runner, 60, { airRetrievedAt: at(0), weatherRetrievedAt: new Date(NOW + 6 * 60 * 1000).toISOString() });
+  assert.equal(beyondSkew.status, "insufficient_data");
+  assert.equal(beyondSkew.sourceFreshness.weather.state, "unknown");
+  assert.equal(beyondSkew.sourceFreshness.air.state, "fresh");
+
+  const substituted = schedule(hours, runner, 60, {
+    forecastValidAt: at(0),
+    modelInitializedAt: at(0),
+    airRetrievedAt: null,
+    weatherRetrievedAt: null,
+  });
+  assert.equal(substituted.status, "insufficient_data");
+  assert.equal(substituted.sourceFreshness.air.state, "unknown");
+  assert.equal(substituted.sourceFreshness.weather.state, "unknown");
+
+  const missingInit = schedule(hours, runner, 60, { ...bothNow, modelInitializedAt: null });
+  const oldInit = schedule(hours, runner, 60, { ...bothNow, modelInitializedAt: new Date(NOW - 40 * HOUR).toISOString() });
+  assert.equal(missingInit.status, "suitable_windows");
+  assert.equal(oldInit.status, "suitable_windows");
+  assert.equal(missingInit.sourceFreshness.air.modelRunAgeMs, null);
+  assert.equal(oldInit.sourceFreshness.air.modelRunAgeMs, 40 * HOUR);
+  assert.equal(oldInit.sourceFreshness.weather.modelRunAgeMs, null);
+  assert.deepEqual(scheduledWindows(missingInit), scheduledWindows(baseline));
+  assert.deepEqual(scheduledWindows(oldInit), scheduledWindows(baseline));
 });

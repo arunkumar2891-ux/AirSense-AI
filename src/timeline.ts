@@ -1,5 +1,5 @@
 import type { GoWindowResponse, GoWindowResult, GoWindowTimePreference } from "./types";
-import { getAqiPresentation } from "./reliability";
+import { formatTimingDisclosure, getAqiPresentation, getRetrievalAge } from "./reliability";
 import {
   GO_WINDOW_TIME_PREFERENCES,
   formatForecastAqi,
@@ -93,6 +93,15 @@ type BuildInput = {
   result?: GoWindowResponse | null;
   now?: number;
 };
+
+function weatherRetrievalText(result: GoWindowResponse | null | undefined, now: number) {
+  const weather = result?.sourceFreshness?.weather;
+  if (!weather) return "";
+  const age = getRetrievalAge(weather.timestamp, now);
+  const timing = age.valid ? age.label : "retrieval time unavailable";
+  const tone = weather.state === "stale" ? "old" : weather.state === "unknown" ? "unavailable" : weather.state === "aging" ? "aging" : "recent";
+  return ` Weather: ${timing} · ${tone}.`;
+}
 
 type Clock = {
   year: number;
@@ -279,7 +288,15 @@ export function buildActivityTimeline(input: BuildInput): ActivityTimeline | nul
       weather: formatForecastWeather(window),
       rankReason: window.rankReason,
       recommendationLabel: recommendationSentence(window.recommendationLabel),
-      freshness: window.dataFreshness?.label || input.result?.forecastFreshness?.label || "Forecast age unavailable",
+      freshness: `${input.result?.metadata?.timestamps
+        ? `${formatTimingDisclosure({
+          forecastValidAt: input.result.metadata.timestamps.forecastValidAt,
+          modelInitializedAt: input.result.metadata.timestamps.modelInitializedAt,
+          retrievedAt: input.result.metadata.timestamps.retrievedAt,
+          timezone: window.timezone || timeZone,
+          now,
+        }).summary}.`
+        : window.dataFreshness?.label || input.result?.forecastFreshness?.label || "Model run age unavailable."}${weatherRetrievalText(input.result, now)}`,
       limitations: window.limitations || input.result?.limitations || "",
       caveat,
       startMs,
@@ -396,7 +413,15 @@ export function buildActivityTimeline(input: BuildInput): ActivityTimeline | nul
 
   const nowLabel = hourLabel(now, timeZone, false);
   const nowPercent = Math.min(100, Math.max(0, ((now - origin) / span) * 100));
-  const freshness = input.result?.forecastFreshness?.label || "Forecast age unavailable until a schedule is requested.";
+  const freshness = `${input.result?.metadata?.timestamps
+    ? `${formatTimingDisclosure({
+      forecastValidAt: input.result.metadata.timestamps.forecastValidAt,
+      modelInitializedAt: input.result.metadata.timestamps.modelInitializedAt,
+      retrievedAt: input.result.metadata.timestamps.retrievedAt,
+      timezone: timeZone,
+      now,
+    }).summary}.`
+    : input.result?.forecastFreshness?.label || "Model run age unavailable."}${weatherRetrievalText(input.result, now)}`;
   const timezoneNote = zone.fallback
     ? "The location timezone was unavailable, so these hour labels use UTC."
     : `Times use ${timeZone}.`;

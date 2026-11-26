@@ -3,12 +3,27 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import ts from "typescript";
 
-async function loadGoWindow() {
-  const source = await readFile(new URL("../src/gowindow.ts", import.meta.url), "utf8");
-  const { outputText } = ts.transpileModule(source, {
+const sourceRoot = new URL("../src/", import.meta.url);
+
+async function compile(relativePath, cache = new Map()) {
+  if (cache.has(relativePath)) return cache.get(relativePath);
+  const source = await readFile(new URL(relativePath, sourceRoot), "utf8");
+  let { outputText } = ts.transpileModule(source, {
     compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 },
   });
-  return import(`data:text/javascript;base64,${Buffer.from(outputText).toString("base64")}`);
+  const specs = [...new Set([...outputText.matchAll(/from\s+["'](\.\/[^"']+)["']/g)].map((match) => match[1]))];
+  for (const spec of specs) {
+    const dep = `${spec.replace(/^\.\//, "").replace(/\.js$/, "")}.ts`;
+    const url = await compile(dep, cache);
+    outputText = outputText.replaceAll(`"${spec}"`, `"${url}"`).replaceAll(`'${spec}'`, `'${url}'`);
+  }
+  const url = `data:text/javascript;base64,${Buffer.from(outputText).toString("base64")}`;
+  cache.set(relativePath, url);
+  return url;
+}
+
+async function loadGoWindow() {
+  return import(await compile("gowindow.ts"));
 }
 
 const location = { lat: 13.0827, lon: 80.2707 };
@@ -91,6 +106,85 @@ test("suitable windows render ranked forecast context without fabricated fields"
   assert.match(view.windows[0].freshness, /Observed 1 min ago/);
   assert.equal(view.windows[2].best, false);
   assert.equal(view.windows[0].alternative, false);
+});
+
+test("GoWindow card timing ages from retrievedAt at display time, not from valid time", async () => {
+  const { presentGoWindow } = await loadGoWindow();
+  const result = {
+    status: "suitable_windows",
+    activity: "running",
+    durationMinutes: 45,
+    timezone: "Asia/Kolkata",
+    evaluatedAt: "2026-11-25T02:30:00.000Z",
+    forecastFreshness: { state: "fresh", ageMs: 0, label: "server label" },
+    metadata: { timestamps: { forecastValidAt: "2026-11-25T01:00:00.000Z", retrievedAt: "2026-11-25T02:29:00.000Z", modelInitializedAt: null } },
+    windows: [windowResult()],
+    reason: "One window.",
+    limitations: "Forecast recommendations are model estimates.",
+    estimate: true,
+  };
+  const soon = presentGoWindow(result, Date.parse("2026-11-25T02:30:00.000Z"));
+  assert.match(soon.windows[0].freshness, /Forecast valid for/);
+  assert.match(soon.windows[0].freshness, /\(1 min ago\)/);
+  assert.match(soon.windows[0].freshness, /Model run age unavailable/);
+  const later = presentGoWindow(result, Date.parse("2026-11-25T03:29:00.000Z"));
+  assert.match(later.windows[0].freshness, /\(1h ago\)/);
+  assert.doesNotMatch(later.windows[0].freshness, /OUTDATED|server label/);
+});
+
+test("each source's retrieval age is shown separately and an old source stays visible", async () => {
+  const { presentGoWindow } = await loadGoWindow();
+  const now = Date.parse("2026-11-25T02:30:00.000Z");
+  const policy = {
+    basis: "retrievedAt",
+    freshWithinMs: 30 * 60 * 1000,
+    staleAfterMs: 3 * 60 * 60 * 1000,
+    clockSkewToleranceMs: 5 * 60 * 1000,
+    note: "The 30-minute and 3-hour retrieval limits are AirSense policy thresholds, not provider guarantees.",
+  };
+  const staleWeather = presentGoWindow({
+    status: "insufficient_data",
+    activity: "running",
+    durationMinutes: 45,
+    timezone: "Asia/Kolkata",
+    evaluatedAt: "2026-11-25T02:30:00.000Z",
+    forecastFreshness: { state: "stale", ageMs: null, label: "combined" },
+    sourceFreshness: {
+      air: { source: "air", state: "fresh", ageMs: 60000, timestamp: "2026-11-25T02:29:00.000Z", label: "Air-quality data retrieved 1 min ago.", basis: "retrievedAt", modelRunAgeMs: null },
+      weather: { source: "weather", state: "stale", ageMs: 4 * 3600000, timestamp: "2026-11-24T22:30:00.000Z", label: "Weather data retrieved 4h ago.", basis: "retrievedAt", modelRunAgeMs: null },
+    },
+    freshnessPolicy: policy,
+    windows: [],
+    reason: "Retrieved weather data is too old for a reliable scheduling decision.",
+    limitations: "Forecast recommendations are model estimates.",
+    estimate: true,
+  }, now);
+  assert.equal(staleWeather.state, "insufficient_data");
+  assert.deepEqual(staleWeather.retrievalLines, [
+    { source: "air", tone: "fresh", text: "Air quality: Retrieved 1 min ago · recent" },
+    { source: "weather", tone: "stale", text: "Weather: Retrieved 4h ago · old" },
+  ]);
+  assert.match(staleWeather.policyNote, /not provider guarantees/);
+  assert.doesNotMatch(staleWeather.retrievalLines.map((line) => line.text).join(" "), /model/i);
+
+  const missingWeather = presentGoWindow({
+    status: "insufficient_data",
+    activity: "running",
+    durationMinutes: 45,
+    timezone: "UTC",
+    evaluatedAt: "2026-11-25T02:30:00.000Z",
+    forecastFreshness: { state: "unknown", ageMs: null, label: "combined" },
+    sourceFreshness: {
+      air: { source: "air", state: "fresh", ageMs: 0, timestamp: "2026-11-25T02:30:00.000Z", label: "recent", basis: "retrievedAt", modelRunAgeMs: null },
+      weather: { source: "weather", state: "unknown", ageMs: null, timestamp: null, label: "Weather data retrieval time unavailable.", basis: "retrievedAt", modelRunAgeMs: null },
+    },
+    freshnessPolicy: policy,
+    windows: [],
+    reason: "The weather retrieval time is missing, invalid, or in the future.",
+    limitations: "Forecast recommendations are model estimates.",
+    estimate: true,
+  }, now);
+  assert.deepEqual(missingWeather.retrievalLines[1], { source: "weather", tone: "unknown", text: "Weather: Retrieval time unavailable · unavailable" });
 });
 
 test("a 2 AM alternative is not presented as the best daytime window", async () => {
@@ -231,6 +325,8 @@ test("dashboard wiring prevents duplicate submissions and stale GoWindow respons
   assert.match(panel, /aria-live="polite"/);
   assert.match(helper, /Suitable based on available forecast data\./);
   assert.match(panel, /window\.recommendationLabel/);
+  assert.match(panel, /aria-label="Retrieval times"/);
+  assert.match(panel, /gowindow-retrieval/);
   assert.match(app, /setSchedule\(null\)/);
   assert.match(app, /setScheduleError/);
   assert.match(api, /JSON\.stringify\(request\)/);

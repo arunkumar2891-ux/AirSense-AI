@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildExposureDecision, getPM25Status, getDataFreshness } from "./logic.js";
+import { buildExposureDecision, buildRecommendationContext, getAQIStatus, getPM25Status, getDataFreshness, insufficientExposureGuidance } from "./logic.js";
 
 function makeAir(overrides = {}) {
   return {
@@ -197,4 +197,200 @@ test("all allowed activity/profile combinations produce deterministic recommenda
       }
     }
   }
+});
+
+const WIND_NOW = Date.parse("2026-11-25T21:00:00.000Z");
+const windAt = (minutes) => new Date(WIND_NOW + minutes * 60000).toISOString();
+
+function windAir(overrides = {}) {
+  return {
+    aqi: 80,
+    aqiScale: "US AQI",
+    pollutants: { pm25: 8 },
+    weather: { wind_speed_10m: 4.9 },
+    observedAt: windAt(0),
+    forecastValidAt: windAt(-15),
+    retrievedAt: windAt(-2),
+    weatherRetrievedAt: windAt(-3),
+    metadata: { isModelledEstimate: true },
+    hourly: [],
+    ...overrides,
+  };
+}
+
+const commute = { activity: "commuting", ageGroup: "adult", sensitivity: "general" };
+
+test("fresh air and fresh weather apply the 0.5 wind adjustment only below 5 km/h", () => {
+  const calm = buildExposureDecision(windAir(), commute, WIND_NOW);
+  const threshold = buildExposureDecision(windAir({ weather: { wind_speed_10m: 5 } }), commute, WIND_NOW);
+  const breezy = buildExposureDecision(windAir({ weather: { wind_speed_10m: 12 } }), commute, WIND_NOW);
+  assert.equal(calm.wind.points, 0.5);
+  assert.equal(calm.wind.applied, true);
+  assert.equal(calm.wind.state, "included");
+  assert.equal(calm.overallRisk, "moderate");
+  assert.equal(calm.dataFreshness.timestamp, windAt(-2));
+  assert.equal(calm.wind.freshness.timestamp, windAt(-3));
+  assert.notEqual(calm.dataFreshness.timestamp, calm.wind.freshness.timestamp);
+  assert.equal(calm.wind.disclosure, "Wind of 4.9 km/h increased the exposure score by 0.5 points. Retrieved 3 minutes ago.");
+  assert.match(calm.reasoning, /increased the exposure score by 0\.5 points/);
+  assert.equal(threshold.wind.points, 0);
+  assert.equal(threshold.wind.applied, true);
+  assert.equal(threshold.overallRisk, "low");
+  assert.equal(threshold.wind.disclosure, "Wind of 5 km/h was considered; no score adjustment was needed. Retrieved 3 minutes ago.");
+  assert.equal(breezy.wind.points, 0);
+  assert.equal(breezy.overallRisk, "low");
+  assert.equal(breezy.activityRecommendation, calm.activityRecommendation);
+});
+
+test("aging weather keeps the wind adjustment and discloses its age", () => {
+  const decision = buildExposureDecision(windAir({ weatherRetrievedAt: windAt(-90) }), commute, WIND_NOW);
+  assert.equal(decision.wind.state, "included_aging");
+  assert.equal(decision.wind.points, 0.5);
+  assert.equal(decision.overallRisk, "moderate");
+  assert.equal(decision.wind.disclosure, "Wind of 4.9 km/h increased the exposure score by 0.5 points. Retrieved 2 hours ago. The reading may not reflect current conditions.");
+  assert.equal(decision.dataFreshness.state, "fresh");
+});
+
+test("stale, missing, invalid, and future weather retrieval excludes the wind adjustment", () => {
+  const stale = buildExposureDecision(windAir({ weatherRetrievedAt: windAt(-240) }), commute, WIND_NOW);
+  assert.equal(stale.wind.state, "excluded_stale");
+  assert.equal(stale.wind.points, 0);
+  assert.equal(stale.overallRisk, "low");
+  assert.equal(stale.wind.disclosure, "Wind of 4.9 km/h was excluded from scoring because the weather data is too old. Retrieved 4 hours ago.");
+  assert.equal(stale.dataFreshness.state, "fresh");
+
+  for (const weatherRetrievedAt of [null, undefined, "", "not-a-time", windAt(30)]) {
+    const decision = buildExposureDecision(windAir({ weatherRetrievedAt }), commute, WIND_NOW);
+    assert.equal(decision.wind.state, "excluded_retrieval_time", String(weatherRetrievedAt));
+    assert.equal(decision.wind.points, 0);
+    assert.equal(decision.overallRisk, "low");
+    assert.match(decision.reasoning, /excluded from scoring because the weather retrieval time is missing, invalid, or in the future/);
+    assert.notEqual(decision.wind.freshness.timestamp, decision.dataFreshness.timestamp);
+  }
+
+  const withinSkew = buildExposureDecision(windAir({ weatherRetrievedAt: windAt(4) }), commute, WIND_NOW);
+  assert.equal(withinSkew.wind.applied, true);
+  assert.equal(withinSkew.wind.points, 0.5);
+  const beyondSkew = buildExposureDecision(windAir({ weatherRetrievedAt: windAt(6) }), commute, WIND_NOW);
+  assert.equal(beyondSkew.wind.state, "excluded_retrieval_time");
+  assert.equal(beyondSkew.wind.points, 0);
+});
+
+test("missing wind is excluded and is not described as favorable", () => {
+  const decision = buildExposureDecision(windAir({ weather: {} }), commute, WIND_NOW);
+  assert.equal(decision.wind.state, "excluded_missing_wind");
+  assert.equal(decision.wind.points, 0);
+  assert.equal(decision.wind.windSpeedKmh, null);
+  assert.equal(decision.wind.disclosure, "Wind was unavailable and was not used in the exposure score. Missing wind is not treated as favorable.");
+  assert.doesNotMatch(decision.wind.disclosure, /favorable wind|increased the exposure score/);
+  assert.equal(decision.overallRisk, "low");
+});
+
+test("stale air still fails its own freshness gate when weather is fresh", () => {
+  const decision = buildExposureDecision(windAir({ retrievedAt: windAt(-240) }), commute, WIND_NOW);
+  assert.equal(decision.dataFreshness.state, "stale");
+  assert.equal(decision.activityRecommendation, "insufficient_data");
+  assert.equal(decision.wind.freshness.state, "fresh");
+  assert.equal(decision.wind.freshness.timestamp, windAt(-3));
+});
+
+test("wind explanations distinguish a score change from a considered reading", () => {
+  const justNow = buildExposureDecision(windAir({ weather: { wind_speed_10m: 5 }, weatherRetrievedAt: windAt(0) }), commute, WIND_NOW);
+  assert.equal(justNow.wind.points, 0);
+  assert.equal(justNow.wind.disclosure, "Wind of 5 km/h was considered; no score adjustment was needed. Retrieved just now.");
+
+  const above = buildExposureDecision(windAir({ weather: { wind_speed_10m: 12 }, weatherRetrievedAt: windAt(-2) }), commute, WIND_NOW);
+  assert.equal(above.wind.points, 0);
+  assert.equal(above.wind.state, "included");
+  assert.equal(above.wind.disclosure, "Wind of 12 km/h was considered; no score adjustment was needed. Retrieved 2 minutes ago.");
+  assert.equal(above.overallRisk, "low");
+  assert.equal(above.activityRecommendation, "suitable");
+
+  const agingBreezy = buildExposureDecision(windAir({ weather: { wind_speed_10m: 8 }, weatherRetrievedAt: windAt(-90) }), commute, WIND_NOW);
+  assert.equal(agingBreezy.wind.points, 0);
+  assert.equal(agingBreezy.wind.state, "included_aging");
+  assert.equal(agingBreezy.wind.disclosure, "Wind of 8 km/h was considered; no score adjustment was needed. Retrieved 2 hours ago. The reading may not reflect current conditions.");
+
+  for (const windSpeed of ["", "fast", -1, Number.NaN]) {
+    const decision = buildExposureDecision(windAir({ weather: { wind_speed_10m: windSpeed } }), commute, WIND_NOW);
+    assert.equal(decision.wind.state, "excluded_missing_wind", String(windSpeed));
+    assert.equal(decision.wind.points, 0);
+    assert.equal(decision.wind.disclosure, "Wind was unavailable and was not used in the exposure score. Missing wind is not treated as favorable.");
+    assert.equal(decision.overallRisk, "low");
+  }
+});
+
+test("fresh wind at or above 5 km/h leaves existing recommendations unchanged", () => {
+  const activities = ["running", "daily activities", "commuting"];
+  for (const activity of activities) {
+    for (const aqi of [35, 80, 120, 185]) {
+      const profile = { activity, ageGroup: "adult", sensitivity: "general" };
+      const fresh = buildExposureDecision(windAir({ aqi, weather: { wind_speed_10m: 12 }, weatherRetrievedAt: windAt(-1) }), profile, WIND_NOW);
+      const noWind = buildExposureDecision(windAir({ aqi, weather: {}, weatherRetrievedAt: windAt(-1) }), profile, WIND_NOW);
+      assert.equal(fresh.wind.points, 0);
+      assert.equal(fresh.activityRecommendation, noWind.activityRecommendation, `${activity} ${aqi}`);
+      assert.equal(fresh.overallRisk, noWind.overallRisk, `${activity} ${aqi}`);
+      assert.equal(fresh.recommendedAction, noWind.recommendedAction, `${activity} ${aqi}`);
+    }
+  }
+});
+
+const FAVORABLE_ACTIVITY_ADVICE = /satisfactory|favorable for|continue usual|most people can continue/i;
+
+test("fresh Good air keeps category advice and the existing exposure decision", () => {
+  assert.equal(getAQIStatus(0).label, "Good");
+  assert.equal(getAQIStatus(50).label, "Good");
+  assert.equal(getAQIStatus(50).level, 1);
+  assert.equal(getAQIStatus(51).label, "Moderate");
+  assert.equal(getAQIStatus(101).level, 3);
+  assert.equal(getAQIStatus(151).level, 4);
+  assert.equal(getAQIStatus(201).level, 5);
+  assert.equal(getAQIStatus(301).level, 6);
+  assert.match(getAQIStatus(41).advice, /generally satisfactory/);
+
+  const profile = { activity: "running", ageGroup: "adult", sensitivity: "general" };
+  const air = windAir({ aqi: 35, pollutants: { pm25: 8 }, weather: { wind_speed_10m: 12 } });
+  const decision = buildExposureDecision(air, profile, WIND_NOW);
+  const context = buildRecommendationContext(air, profile, "Can I run?", decision);
+  assert.equal(decision.activityRecommendation, "suitable");
+  assert.equal(decision.overallRisk, "low");
+  assert.match(decision.recommendedAction, /favorable for running/);
+  assert.equal(context.recommendation, getAQIStatus(35).advice);
+  assert.equal(context.categoryDescription, getAQIStatus(35).advice);
+  assert.match(context.answer, /recommendation: suitable/i);
+});
+
+test("stale, missing, invalid, and future air retrieval cannot recommend favorable activity", () => {
+  const profile = { activity: "daily activities", ageGroup: "adult", sensitivity: "general" };
+  const cases = [
+    ["stale", windAt(-240)],
+    ["missing", null],
+    ["blank", ""],
+    ["invalid", "not-a-time"],
+    ["future", windAt(30)],
+  ];
+  for (const [name, retrievedAt] of cases) {
+    const air = windAir({ aqi: 41, retrievedAt });
+    const decision = buildExposureDecision(air, profile, WIND_NOW);
+    const context = buildRecommendationContext(air, profile, "Can I go out?", decision);
+    assert.equal(decision.activityRecommendation, "insufficient_data", name);
+    assert.equal(air.aqi, 41, name);
+    assert.equal(getAQIStatus(air.aqi).label, "Good", name);
+    assert.equal(context.category, "Good", name);
+    assert.match(context.categoryDescription, /generally satisfactory/, name);
+    assert.equal(context.recommendation, decision.recommendedAction, name);
+    assert.equal(context.recommendation, insufficientExposureGuidance(decision.dataFreshness), name);
+    assert.doesNotMatch(context.recommendation, FAVORABLE_ACTIVITY_ADVICE, name);
+    assert.doesNotMatch(decision.recommendedAction, FAVORABLE_ACTIVITY_ADVICE, name);
+    assert.match(context.answer, /insufficient data/i, name);
+    assert.match(context.answer, new RegExp(decision.recommendedAction.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")), name);
+  }
+
+  const recoveredAir = windAir({ aqi: 41 });
+  const recovered = buildExposureDecision(recoveredAir, profile, WIND_NOW);
+  const recoveredContext = buildRecommendationContext(recoveredAir, profile, "Can I go out?", recovered);
+  assert.equal(recovered.dataFreshness.state, "fresh");
+  assert.equal(recovered.activityRecommendation, "suitable");
+  assert.equal(recoveredContext.recommendation, getAQIStatus(41).advice);
+  assert.match(recoveredContext.recommendation, /generally satisfactory/);
 });

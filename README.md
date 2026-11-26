@@ -1,69 +1,108 @@
-# AirSense AI 🌿
+# AirSense AI
 
-**Understand your air. Make smarter decisions. Breathe better.**
+**Understand the air you have. Choose a time that fits the activity.**
 
-AirSense AI is a context-aware urban air quality assistant. It combines modeled air-quality and weather data with a lightweight decision engine and an optional LLM to turn environmental readings into practical, personalized guidance.
+AirSense AI is a deterministic outdoor-exposure assistant. It turns modelled air-quality and weather data into an activity-specific recommendation for right now, and it uses the same rules to find later forecast windows for a chosen activity and duration. An optional Gemini call can only select explanation sentences the server has already written.
 
-## Chosen vertical
-Urban air quality assistant.
+## Project overview
+
+People usually see one AQI number and still have to decide whether a run, a commute, or outdoor play makes sense. AirSense keeps that decision in a rule engine. The current reading answers "what should I do now?" GoWindow answers "when, in the next 12 hours, does this activity have a long enough suitable interval?" A better hour later does not change the current recommendation.
+
+The dashboard opens on Chennai without an account or a location grant. Search, optional browser location, activity, age group, and sensitivity change the same deterministic result. Gemini is optional. With no API key, the assistant still returns the engine's recommendation.
 
 ## Problem
-People often see an AQI number but do not know what it means for their planned activity, household context, or exposure. AirSense AI translates environmental measurements into understandable guidance while clearly communicating uncertainty.
+
+An AQI category does not say whether a particular outdoor activity is suitable, how old the underlying fetch is, or whether a later hour is actually long enough. Generic chatbots can also rewrite a cautious result into a more reassuring one. AirSense separates the decision from the explanation and labels modelled estimates as estimates.
 
 ## What makes AirSense different
-- **Decisions are deterministic; the LLM only explains.** Exposure guidance comes from a rule engine with explicit thresholds. Gemini receives the decision as an authoritative baseline and its response is discarded entirely if its recommendation enum does not match it exactly. Scheduling (GoWindow) never calls an LLM at all.
-- **Future plans never rewrite the present.** The current exposure decision uses only the current observation. GoWindow evaluates future hours separately and is labelled as forecast estimates, so a good window later cannot make bad air now look safe.
-- **Missing data is never favorable data.** A missing US AQI reading means "unavailable," not "clean." Incomplete PM2.5, weather, or conflicting duplicate hours are disclosed in limitations and excluded from scheduling rather than assumed safe.
-- **US AQI and European AQI are never mixed.** The scales are not interchangeable; if US AQI is absent the app says so instead of converting.
-- **Time preferences respect your day without weakening safety.** Preferred times filter already-safe windows; they never relax the thresholds that decide what is safe.
 
-## Features
-- Current modeled air-quality data and weather for selected cities or browser geolocation
-- US AQI, pollutant concentrations and a 12-hour outlook
-- Personalized guidance using activity, age group and sensitivity context
-- GoWindow: deterministic scheduling of 15–180 minute outdoor activities with optional time-of-day preferences and a 12-hour planning timeline
-- Optional Gemini or Groq conversational reasoning, with deterministic fallback
-- Server-side API proxy, short-lived cache, input validation and health endpoint
-- Responsive, accessible dashboard with persisted Light, Dark and System themes
+- **The decision is deterministic.** US AQI, PM2.5, activity, age, sensitivity, eligible wind, and retrieval freshness produce `overallRisk`, `activityRecommendation`, and `recommendedAction` in `server/logic.js`. Gemini cannot replace those fields.
+- **GoWindow is the scheduling feature.** It searches the next 12 forecast hours for up to three non-overlapping windows that cover the requested duration. It uses the same exposure engine and never calls Gemini.
+- **Now and later stay separate.** The overview decision uses the current air reading. GoWindow evaluates future hours on their own. A suitable window does not make the current recommendation more favorable.
+- **Missing data stays missing.** A missing US AQI is unavailable, not clean. Missing PM2.5, missing weather, and conflicting duplicate hours are disclosed and are not treated as favorable.
+- **US AQI stays on the US scale.** European AQI is requested from the provider only so it can be ignored. It is never displayed or converted.
+- **Time preferences filter windows after the safety decision.** Morning, afternoon, evening, and daytime do not relax an exposure threshold.
 
-## Architecture
-- React + TypeScript + Vite frontend
-- Express backend serves the built frontend and API endpoints
-- Open-Meteo Air Quality API and Forecast API
-- CAMS-based air-quality model estimates
-- Rule-based decision engine; optional Gemini/Groq adapter
-- `POST /api/gowindow` ranks future activity windows from server-fetched forecasts. It does not accept client-supplied readings and does not call Gemini.
+## Data sources and limitations
 
-## Location & privacy
+| Source | Role |
+|---|---|
+| [Open-Meteo Air Quality API](https://open-meteo.com/en/docs/air-quality-api) | Current and hourly US AQI and pollutant fields. The displayed scale is US AQI. |
+| [Open-Meteo Forecast API](https://open-meteo.com/en/docs) | Current weather, and hourly weather for GoWindow. |
+| [Open-Meteo Geocoding API](https://open-meteo.com/en/docs/geocoding-api) | City search. Place names come from GeoNames. |
+| [BigDataCloud client reverse geocoding](https://www.bigdatacloud.com/free-api/free-reverse-geocode-to-city-api) | Optional browser-only place name for a GPS fix. |
+| Copernicus Atmosphere Monitoring Service (CAMS) | Atmospheric model behind the Open-Meteo air-quality fields. |
 
-The dashboard is location-first:
+Air-quality values are modelled estimates, not readings from a nearby regulatory station. The app does not identify the cleanest street or route.
 
-- On first visit the app explains why location helps, then asks for browser geolocation permission. It never blocks the dashboard while waiting — Chennai loads immediately as the default city.
-- Granted permission loads local air quality and weather and asks BigDataCloud's browser-only reverse-geocoding endpoint directly for a friendly place name (city, region, country). The server never sends coordinates to BigDataCloud.
-- You can search any city worldwide (`/api/geocode`, backed by Open-Meteo's geocoding API). A manually selected location takes precedence over GPS for the rest of the session, and a "Back to my location" action returns to GPS at any time.
-- Permission is never re-requested: once denied or dismissed, the app stays on Chennai with the search field, marked `DEFAULT` so GPS, selected, and default locations are always clearly distinguished.
-- Precise coordinates are never sent to Gemini (locked in by a test) and never persisted beyond session storage. Environmental API coordinates are rounded to two decimal places (about 1 km) before server-side caching. For GPS naming only, the browser shares the current coordinates directly with BigDataCloud under its client-side endpoint terms; failure falls back honestly to “Your location.”
-- Denial, timeout, unavailable position, and geocoding failures all degrade gracefully with a visible notice — the app never fabricates a location or an environmental reading.
+Resolution depends on what the provider identifies:
 
-## How it works
-1. The browser resolves a location: GPS geolocation (after an explained permission request), a searched city, or the Chennai default.
-2. The backend fetches air-quality and weather data from Open-Meteo and caches responses for 10 minutes in a bounded 500-entry LRU cache. Concurrent requests for the same rounded location share one upstream request.
-3. The UI displays the reported AQI, pollutant levels and the next available hourly forecast from the current local hour onward.
-4. The assistant combines the supplied readings with the user's activity and sensitivity profile.
-5. If configured, an LLM explains the supplied facts. If the provider is unavailable or not configured, the deterministic guidance engine responds.
-6. `POST /api/gowindow` separately evaluates the trusted hourly forecast for a 15–180 minute activity. The dashboard sends the selected location, activity profile, duration, and an optional time preference. Preferred times use the location timezone. Suitable windows, alternatives outside that preference, no suitable window, and insufficient forecast data stay distinct and do not change the current exposure guidance. The planning timeline draws those returned windows on the next 12 local hours and does not create recommendations of its own.
+- Outside the CAMS Europe coverage envelope, Open-Meteo serves the CAMS global model. AirSense discloses that model at its documented nominal resolution of about 0.4°, approximately 45 km. A snapped serving-cell coordinate is not that resolution.
+- Inside the envelope, a provider `model` or `domain` of `cams_europe` or `cams_global` uses that model's documented resolution. CAMS Europe's documented grid is about 0.1°, approximately 11 km.
+- Inside the envelope, when the provider does not identify the serving domain, AirSense does not choose a resolution. The European and global models can both be in use, so the European resolution stays unverified.
 
-## GoWindow scheduling
+Guidance is informational and is not medical advice. Local public-health advisories take precedence. Alerts, saved profiles, multi-stop routes, and long-term personal exposure tracking are not part of this demo.
 
-GoWindow finds up to three non-overlapping future windows for one outdoor activity. It is fully deterministic — no LLM is involved in scheduling.
+## Freshness policy
 
-1. The browser sends only the selected coordinates, activity profile, duration (15–180 minutes), and an optional time preference. It never sends readings, and any client-supplied environmental fields are ignored (locked by tests).
-2. The server fetches the trusted Open-Meteo forecast itself, in Unix timestamps so daylight-saving transitions stay unambiguous, and evaluates each of the next 12 hourly instants with the same `server/logic.js` exposure engine that powers current guidance.
-3. Hours classified `suitable` for the profile are chained into contiguous intervals. A window must be fully covered by suitable hours — gaps, unavailable readings, and conflicting duplicate hours break a window rather than being assumed safe.
-4. Candidate windows are ranked by worst-hour US AQI, then known PM2.5 (windows missing PM2.5 rank below windows with known values at equal AQI and disclose it), then low-wind stagnation hours, then earliest start.
-5. If a time preference is set, windows must lie fully inside it, computed in the location's IANA timezone — never the browser or server timezone. Suitable windows outside the preference may be listed as clearly labelled **alternatives**, never as the primary recommendation. If nothing anywhere is suitable, the response is an explicit `no_suitable_window` — nothing is fabricated.
+Three timestamps mean different things:
 
-### API
+| Field | Meaning |
+|---|---|
+| `forecastValidAt` | When the forecast value applies. For an hourly slot, this is the hour being labelled. It does not age the data. |
+| `retrievedAt` | When AirSense fetched that provider response. This is the freshness clock for that response. |
+| `modelInitializedAt` | A genuine model-initialization time, kept only when the provider response includes one. It is never inferred from generation time, the server clock, or `forecastValidAt`. |
+
+Retrieval age is not model-run age. A window or overview label that says when data was retrieved is describing `retrievedAt`. Model-run age appears only beside a genuine `modelInitializedAt`. When that timestamp is absent, the label says the model-run age is unavailable.
+
+These limits are AirSense policy, not a provider guarantee:
+
+- A timestamp up to 5 minutes ahead of the evaluation clock has age zero. That allowance covers clock skew.
+- A timestamp more than 5 minutes ahead is unknown.
+- A missing, blank, or unparseable timestamp is unknown.
+- Age through 30 minutes is fresh.
+- Age through 3 hours is aging. Aging data can still support a current decision or a GoWindow result, and the age is disclosed.
+- Age over 3 hours is stale. Stale or unknown air data does not support a current activity recommendation. Stale or unknown air or weather data does not support a GoWindow schedule.
+
+Air quality, current weather, and GoWindow weather are validated separately. The air response's `retrievedAt` never stands in for `weatherRetrievedAt`, and an hour's valid time never stands in for either retrieval time. Current wind uses the current weather fetch. GoWindow requires both its air-quality retrieval time and its weather retrieval time to be fresh or aging.
+
+## Exposure methodology
+
+The engine in `server/logic.js` runs before any model call. US EPA category ranges classify the reported US AQI: Good through 50, Moderate through 100, Unhealthy for Sensitive Groups through 150, Unhealthy through 200, Very Unhealthy through 300, and Hazardous above that. PM2.5 can raise the score from its own concentration bands. A missing PM2.5 value cannot lower the recommendation required by the reported US AQI.
+
+| Factor | How it contributes |
+|---|---|
+| US AQI | Primary risk level from the EPA bands above. |
+| PM2.5 | Independent contribution. Its absence is not treated as clean air. |
+| Activity | Vigorous activities (running, cycling, outdoor workout, sports) add more risk than commuting. |
+| Vulnerability | Child, older adult, respiratory sensitivity, and heart or lung condition add risk. |
+| Wind | See the wind rule below. Wind never uses the air-quality retrieval time. |
+| Forecast trend | Reported as context. It does not change the current recommendation. |
+| Retrieval freshness | Stale or unknown air data returns `insufficient_data`. |
+
+A reported US AQI in the Unhealthy for Sensitive Groups band or worse cannot produce a `suitable` recommendation. Very Unhealthy and Hazardous cannot produce a recommendation below `avoid`. Unhealthy air together with a vigorous activity is `avoid`.
+
+### Wind
+
+Wind speed is eligible only when `weatherRetrievedAt` is fresh or aging.
+
+- Below 5 km/h adds 0.5 points.
+- 5 km/h or above adds zero points. The reading was considered; it does not improve the score.
+- Stale weather, an unknown weather retrieval time, or a missing or invalid wind speed excludes wind from the score.
+- Excluded wind is not treated as favorable. Zero points from exclusion means "not used," not "good ventilation."
+
+## GoWindow
+
+GoWindow finds up to three non-overlapping future windows for one outdoor activity. Scheduling is deterministic.
+
+1. The browser sends coordinates, the activity profile, a duration, and an optional time preference. It does not send air or weather readings. Client-supplied environmental fields are ignored.
+2. The server fetches the Open-Meteo air-quality and weather forecasts itself, using Unix timestamps so daylight-saving transitions stay unambiguous.
+3. Both retrieval timestamps must be fresh or aging. If either is stale or unknown, the status is `insufficient_data` and no window is returned.
+4. Each of the next 12 hourly instants is classified with the same exposure engine. An hour's `forecastValidAt` labels that hour. It does not determine retrieval freshness.
+5. Hours classified `suitable` are chained into contiguous intervals. The whole duration must be covered. Gaps, unavailable readings, and conflicting duplicate hours break a window.
+6. Candidates are ranked by lowest worst-hour US AQI, then known PM2.5 ahead of missing PM2.5, then lower known PM2.5, then fewer hours below 5 km/h, then earlier start. Missing PM2.5 does not rank as clean air.
+
+### Request
 
 ```http
 POST /api/gowindow
@@ -79,70 +118,131 @@ Content-Type: application/json
 }
 ```
 
-Input is validated against allowlists before any upstream call: coordinates must be finite and in range; `activity`, `ageGroup`, and `sensitivity` must be known values; `profile.activity` must match `activity`; `durationMinutes` must be an integer from 15 to 180; `timePreference` must be one of `any`, `morning`, `afternoon`, `evening`, `daytime` (omitting it preserves the original any-time behavior). Invalid input returns `400` with no upstream fetch. The endpoint is rate-limited like the other data endpoints and shares the bounded upstream cache.
+`durationMinutes` must be an integer from 15 to 180. `timePreference` is `any`, `morning`, `afternoon`, `evening`, or `daytime`. Omitting it leaves the search unrestricted. The dashboard default is `daytime`. Invalid input returns HTTP 400 and does not call the provider.
 
-Responses carry a `status` of `suitable_windows`, `outside_preference` (alternatives only), `no_suitable_window`, or `insufficient_data`, plus per-window AQI/PM2.5/weather ranges, ranking explanations, data-freshness labels, and limitations. `outside_preference` windows are marked `placement: "alternative"`.
-
-### Time preferences
-
-| Preference | Local range (location timezone) |
+| Preference | Local range in the location timezone |
 |---|---|
 | `any` | No restriction |
-| `morning` | 5 AM–12 PM |
-| `afternoon` | 12 PM–5 PM |
-| `evening` | 5 PM–10 PM |
-| `daytime` | 5 AM–10 PM (dashboard default) |
+| `morning` | 5:00 AM–12:00 PM |
+| `afternoon` | 12:00 PM–5:00 PM |
+| `evening` | 5:00 PM–10:00 PM |
+| `daytime` | 5:00 AM–10:00 PM |
 
-A window counts as inside a preference only when its start and end both fall inside the range on the same local day. Preferences filter already-suitable windows; they never change exposure thresholds.
+A window is inside a preference only when its start and end both fall inside that range on the same local day. The location's IANA timezone is used, not the browser or server timezone.
 
-### Planning timeline
+### Response states
 
-The dashboard draws the next 12 local hours from the same forecast data: hour labels in the location timezone (midnight and DST handled via absolute instants), per-hour forecast US AQI category and PM2.5, the selected preference range, a current-time marker, and the scheduler's returned windows. Hour cells are informational only — they are never selectable as activities. Only backend-returned windows are selectable, and selecting one shows its start/end, duration, forecast AQI, PM2.5, weather, and ranking explanation. Hours without forecast readings are shown as "No forecast" and are never interpolated. The current exposure card remains a separate decision above.
-
-### Limitations and safety
-
-- Windows are forecast model estimates (CAMS via Open-Meteo), not sensor readings, guarantees, or medical clearance. Official local public-health advisories always take precedence.
-- Missing US AQI data yields `insufficient_data`; missing PM2.5 is disclosed and never treated as clean air; missing weather is disclosed and never assumed.
-- A "suitable" window describes forecast data only. Conditions can change; the freshness label on every window says how old the underlying model run is.
-
-## Assumptions and limitations
-- Open-Meteo air-quality values are model-based estimates, not guaranteed readings from a nearby regulatory station. Spatial resolution and forecast uncertainty apply.
-- The MVP displays US AQI only. If the provider does not return a US AQI value, the app shows data as unavailable rather than substituting European AQI, because these scales are not interchangeable.
-- The MVP uses global city search plus browser geolocation; it does not claim to identify the cleanest street or route.
-- AQI bands follow the US EPA AQI category ranges when the US AQI field is available. European AQI is never substituted or converted because the scales are not interchangeable.
-- Guidance is informational and not medical advice. Follow local public-health authorities.
-- Alerts, saved profiles, multi-stop route exposure and long-term personal exposure tracking are future enhancements.
-
-## Decision-making methodology
-
-AirSense uses a deterministic exposure intelligence engine (`server/logic.js`) before any LLM involvement. The engine combines:
-
-| Factor | How it contributes |
+| Status | Meaning |
 |---|---|
-| US AQI (EPA bands) | Primary risk driver (level 1–6) |
-| PM2.5 concentration | Independent contribution — can elevate risk beyond AQI alone (WHO/EPA breakpoints) |
-| Activity intensity | Vigorous (running, cycling, outdoor workout, sports) adds risk; prolonged (commuting) adds less |
-| Vulnerability | Children, older adults, and respiratory/heart-lung sensitivity each add risk |
-| Wind speed | Low wind (<5 km/h) adds stagnation risk |
-| Forecast trend | Future-only model forecast is reported as context; it never changes the current exposure recommendation |
-| Data freshness | Stale (>3h), missing, invalid, or future-dated observations return `insufficient_data` |
+| `suitable_windows` | Up to three ranked windows cover the duration. With a preference, they lie fully inside it. |
+| `outside_preference` | Nothing inside the preference is long enough. Returned windows are alternatives, marked `placement: "alternative"`, and are not the primary recommendation. |
+| `no_suitable_window` | The forecast was usable, and no interval is long enough for the duration. This is distinct from missing data. |
+| `insufficient_data` | A retrieval time is stale or unknown, US AQI is missing, or the next 12 hours do not contain usable forecast hours. `windows` is empty. |
 
-The engine produces a structured decision: `overallRisk`, `activityRecommendation`, `recommendedAction`, `reasoning`, `sensitiveGroupAdvice`, `alternativeActivity`, `dataFreshness`, and `limitations`.
+Each window includes US AQI and PM2.5 ranges when known, weather ranges, a ranking explanation, limitations, and retrieval freshness. The planning timeline draws the next 12 local hours and the windows the server returned. Hour cells are not themselves recommendations.
 
-Open-Meteo is requested with Unix timestamps so observations and forecasts remain unambiguous across locations and daylight-saving changes. The next-12-hours series starts at the current local-hour bucket; completed past hours are excluded. A missing provider timestamp is never replaced with the server clock.
+## Gemini architecture
 
-When Gemini is configured, it receives this decision as an authoritative baseline. Its structured response must include a strict `recommendation` enum (`suitable`, `caution`, `avoid`, or `insufficient_data`) that exactly matches the deterministic engine. A mismatch, malformed response, or invalid enum discards the entire AI response and returns the deterministic answer. Gemini may explain supplied facts but cannot weaken or replace the exposure recommendation. The same deterministic recommendation is used when no API key is configured.
+Gemini does not write environmental explanations. When `AI_API_KEY` is set, the server asks the Gemini SDK for JSON with two fields:
 
-### Decision limitations
+- `recommendation`: `suitable`, `caution`, `avoid`, or `insufficient_data`. It must equal the engine's `activityRecommendation`.
+- `claimIds`: IDs copied from the server-built `allowedClaims` list.
 
-- Air quality data are modelled estimates from CAMS via Open-Meteo, not regulatory station readings.
-- The engine does not make medical diagnoses or claim health outcomes.
-- It never recommends ignoring official public-health advisories — limitations text always references them.
-- It never invents a better time or forecast without forecast evidence from the provider.
-- PM2.5 independent assessment uses 24-hour breakpoints, not real-time sub-hourly thresholds.
+`buildExplanationClaims` creates a claim only when its source fact exists and its freshness state allows it. A claim whose fact is missing is not offered. The IDs are:
+
+| Claim ID | Offered when |
+|---|---|
+| `modelled_estimate` | The reading is a modelled estimate. |
+| `us_aqi` | A valid US AQI value is present. |
+| `pm25` | A valid PM2.5 value is present. |
+| `wind_adjustment` | Eligible wind below 5 km/h added 0.5 points. |
+| `wind_considered` | Eligible wind at 5 km/h or above added no points. |
+| `wind_excluded` | Wind was missing, stale, or had an unknown retrieval time. |
+| `weather_aging` | Eligible wind came from aging weather. |
+| `insufficient_data` | The engine recommendation is `insufficient_data`. |
+| `activity_recommendation` | The engine produced a suitable, caution, or avoid action. |
+| `decision_reasoning` | The engine supplied reasoning text. |
+| `not_medical_advice` | Always. This sentence is server-authored. |
+
+The server accepts a response only when all of these hold:
+
+- The object has no fields other than `recommendation` and `claimIds`.
+- The enum matches the deterministic recommendation exactly.
+- `claimIds` contains 1 to 12 unique IDs, each of which was offered for this decision.
+
+The server then joins the sentences it authored for those IDs. Gemini cannot invent a measurement, a forecast, a street-level claim, or a different recommendation. Coordinates are not included in the prompt.
+
+| Mode | When |
+|---|---|
+| `rules` | `AI_API_KEY` is unset. The deterministic answer is returned and Gemini is not called. |
+| `ai` | The enum and claim IDs validate. The answer is the server's sentences for the selected IDs. |
+| `rules-fallback` | The provider errors, times out, or returns an enum mismatch, an unknown claim, a duplicate, an extra field, or malformed JSON. The deterministic answer replaces the model output. |
+
+The assistant calls the Gemini SDK only when `AI_API_KEY` is set. `AI_MODEL` selects that model's id and defaults to `gemini-3.8-flash`.
+
+Optional tuning, with the defaults shown:
+
+```env
+AI_API_KEY=
+AI_MODEL=gemini-3.8-flash
+AI_TIMEOUT_MS=18000
+AI_MAX_RETRIES=2
+AI_MAX_OUTPUT_TOKENS=1024
+```
+
+`gemini-3.8-flash` is the default model id. Put the real key only in the local `.env` or in the host's environment settings. Do not commit it.
+
+## Privacy and security
+
+Browser geolocation is optional. On a first visit the dashboard explains the request and continues on Chennai immediately. Granting permission loads local air and weather. The browser may ask BigDataCloud directly for a city, region, and country. That request does not pass through the AirSense server. Denying or dismissing location keeps Chennai and does not ask again in that session. A searched city overrides GPS until "Back to my location."
+
+The assistant and GoWindow send coordinates, the question, and the profile. They do not send air or weather readings. The server fetches Open-Meteo itself and ignores client-supplied measurements. Coordinates are rounded to two decimal places, about 1 km, before the bounded cache key is formed. The selected place is kept in `sessionStorage` for the browser session and is not written to a database.
+
+API protections:
+
+- Helmet security headers. Browser connections are limited to this origin and `https://api.bigdatacloud.net`.
+- JSON bodies are limited to 30 KB.
+- Production (`NODE_ENV=production`) allows same-origin requests and origins listed in `ALLOWED_ORIGINS`. Development allows local origins so the Vite server can call the API.
+- Default per-IP limits are 60 air-quality requests per minute, 60 GoWindow requests per minute, 30 geocoding requests per minute, and 20 assistant requests per minute. The air-quality and GoWindow limits are separate. `/api/health` is not rate-limited.
+- Upstream responses are cached in a 500-entry LRU. Environmental responses last 10 minutes. Geocoding responses last 24 hours. Concurrent requests for the same cached URL share one upstream call.
+- Provider failures return a timeout or unavailable error. They do not invent a reading.
+
+## Architecture and decision flow
+
+```text
+Browser (React, TypeScript, Vite)
+  |  relative /api requests
+  v
+Express
+  |-- GET  /api/air-quality     current air + current weather
+  |-- GET  /api/geocode         city search
+  |-- GET  /api/reverse-geocode generic GPS label if the browser lookup fails
+  |-- POST /api/gowindow        forecast windows
+  |-- POST /api/assistant       deterministic decision, then optional Gemini claim IDs
+  |-- GET  /api/health
+  v
+Open-Meteo air quality and forecast
+  v
+server/logic.js  ->  recommendation
+server/gowindow.js  ->  window status
+server/gemini.js  ->  claim-ID selection, or rules / rules-fallback
+```
+
+In production, Express serves the Vite build from `dist/` and the API on the same origin. The client calls relative `/api` routes, so the built frontend does not embed an API host. Development runs Vite at `http://localhost:5173` and proxies `/api` to `http://localhost:10000`.
+
+## Demo
+
+1. Install and start the app with the commands in [Run locally](#run-locally). Leave `AI_API_KEY` empty for the deterministic path.
+2. Open `http://localhost:5173`. Chennai loads without granting location. The overview shows a modelled US AQI estimate, retrieval timing, and activity guidance.
+3. Change activity, age group, or sensitivity and ask the assistant a short question. The recommendation matches the exposure engine. With no key, the response mode is `rules`.
+4. Open GoWindow, keep the daytime preference, choose a duration from 15 to 180 minutes, and request windows. Compare a returned window with the current overview: the window does not rewrite the current recommendation.
+5. Deny location, or search another city, and confirm the dashboard names the source of the place. A failed lookup stays on an honest unavailable state rather than a fabricated reading.
+
+This repository does not include demo screenshots.
 
 ## Run locally
-Requirements: Node.js 20+ and npm.
+
+Requirements: Node.js 20 or newer, and npm.
 
 ```bash
 npm install
@@ -150,66 +250,57 @@ cp .env.example .env
 npm run dev
 ```
 
-Frontend: `http://localhost:5173`  
-Backend: `http://localhost:10000`
+- App: `http://localhost:5173`
+- API: `http://localhost:10000`
 
-## AI configuration
-Set these in `.env` (never commit the real key). AirSense uses the official `@google/genai` SDK with structured JSON output.
-
-```env
-AI_PROVIDER=gemini
-AI_API_KEY=your_key
-AI_MODEL=gemini-3.8-flash
-```
-
-Model identifier verified against the [official Gemini API model list](https://ai.google.dev/gemini-api/docs/models). `gemini-3.8-flash` is the current stable Flash model (released September 2026).
-
-Optional tuning:
-
-```env
-AI_TIMEOUT_MS=18000      # overall deadline, including SDK calls, retries and backoff
-AI_MAX_RETRIES=2         # retries on transient errors (429, 500, 503)
-AI_MAX_OUTPUT_TOKENS=1024 # keep responses concise
-```
-
-If no key is configured, AirSense uses its deterministic safety guidance engine. If Gemini fails after retries, the app falls back to the same deterministic engine and reports `mode: "rules-fallback"`.
+`npm run dev` runs the API and the Vite client together. An empty `AI_API_KEY` is a valid demo configuration. The variable names and defaults live in `.env.example`. Fill in `AI_API_KEY` only if you want Gemini to select claim IDs.
 
 ## Test and build
+
 ```bash
 npm test
+npm run typecheck
 npm run build
 npm run check
 ```
 
+`npm test` runs the Node test runner. `npm run typecheck` runs `tsc --noEmit`. `npm run build` writes the frontend to `dist/`. `npm run check` runs typecheck, tests, and the production build in that order.
+
+To serve the production build locally:
+
+```bash
+npm run build
+NODE_ENV=production npm start
+```
+
+`npm start` runs `node server/index.js`, binds `0.0.0.0`, and uses `PORT` or 10000. It serves `dist/` and the API together. Run the build first. Without `NODE_ENV=production`, the process stays in development CORS mode.
+
 ## Deploy to Render
-1. Push this repository to a **public GitHub repository** with only the `main` branch.
-2. In Render, choose **New → Web Service** and connect the repository.
+
+1. Push the repository to a public GitHub repository with only the `main` branch.
+2. In Render, choose **New → Web Service** and connect the repository. The included `render.yaml` is a Blueprint for the same service.
 3. Build command: `npm install && npm run build`
 4. Start command: `npm start`
 5. Health check path: `/api/health`
-6. Add `AI_PROVIDER`, `AI_API_KEY` and optional `AI_MODEL` as Render environment variables. Do not add secrets to GitHub.
-7. Deploy.
+6. Set `NODE_ENV` to `production`. The Blueprint does this. A manual service needs the same variable, because production CORS and proxy trust depend on it.
+7. Set `AI_API_KEY` if Gemini claim selection should run. `AI_MODEL` is optional and defaults to `gemini-3.8-flash`. Leave the key unset to serve the deterministic assistant. Do not put secrets in GitHub.
+8. Deploy.
 
-The included `render.yaml` provides a Blueprint configuration. Render web services must bind to `0.0.0.0`; this app does so and uses Render's `PORT`.
-
-Production explicitly sets `NODE_ENV=production`, so CORS permits same-origin requests and configured `ALLOWED_ORIGINS` only. Default per-IP limits are 60 air-quality requests/minute, 30 location requests/minute, and 20 assistant requests/minute. Health checks are not rate-limited. These values and cache capacity/TTLs are configurable with the variables documented in `.env.example`.
+Render supplies `PORT`. The server binds `0.0.0.0`. Optional rate-limit, cache, and `ALLOWED_ORIGINS` variables are listed in `.env.example`.
 
 ## Repository compliance checklist
+
 - [ ] Public GitHub repository
 - [ ] Exactly one branch (`main`)
-- [ ] Repository under 10 MB (do not commit `node_modules` or `dist`)
+- [ ] Repository under 10 MB, with `node_modules` and `dist` uncommitted
 - [ ] `.env` and API keys excluded
 - [ ] `npm test` passes
 - [ ] `npm run build` passes
-- [ ] README and demo screenshots included
-- [ ] Verify submission form and link before final submission
+- [ ] README included
+- [ ] Demo screenshots included
 
-## Data sources and attribution
-- Air quality: [Open-Meteo Air Quality API](https://open-meteo.com/en/docs/air-quality-api)
-- Weather: [Open-Meteo Forecast API](https://open-meteo.com/en/docs)
-- City search: [Open-Meteo Geocoding API](https://open-meteo.com/en/docs/geocoding-api) using GeoNames data
-- GPS place names: [BigDataCloud Client-side Reverse Geocoding](https://www.bigdatacloud.com/free-api/free-reverse-geocode-to-city-api), called directly by the browser with the current GPS coordinates; generic fallback if unavailable
-- Atmospheric model: Copernicus Atmosphere Monitoring Service (CAMS), as served by Open-Meteo.
+No screenshot files are in this repository, so the screenshot item stays open.
 
 ## License
-Hackathon demonstration project. Review upstream API terms and attribution requirements before public/commercial use.
+
+Hackathon demonstration project. Review upstream API terms and attribution requirements before public or commercial use.

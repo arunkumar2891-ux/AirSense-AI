@@ -1,4 +1,4 @@
-import { buildExposureDecision, getAQIStatus, getDataFreshness, getPM25Status } from "./logic.js";
+import { buildExposureDecision, CLOCK_SKEW_TOLERANCE_MS, getAQIStatus, getPM25Status, getRetrievalFreshness, RETRIEVAL_FRESH_MS, RETRIEVAL_STALE_MS } from "./logic.js";
 import { providerTimeToEpochMs } from "./time.js";
 
 const HOUR_MS = 60 * 60 * 1000;
@@ -20,6 +20,15 @@ const BASE_LIMITATIONS = [
   "A suitable window describes available forecast data only. It is not medical advice or medical clearance.",
   "Always follow official local public-health advisories.",
 ];
+
+// Named here so every GoWindow response can show the policy it was judged by.
+export const FRESHNESS_POLICY = Object.freeze({
+  basis: "retrievedAt",
+  freshWithinMs: RETRIEVAL_FRESH_MS,
+  staleAfterMs: RETRIEVAL_STALE_MS,
+  clockSkewToleranceMs: CLOCK_SKEW_TOLERANCE_MS,
+  note: "The 30-minute and 3-hour retrieval limits are AirSense policy thresholds, not provider guarantees. Forecast valid time and model initialization time are not used as retrieval times.",
+});
 
 function finiteNumber(value) {
   if (value === null || value === undefined || value === "") return null;
@@ -70,7 +79,9 @@ function buildResult({
   evaluatedAt,
   timePreference = null,
   preference = null,
-  forecastFreshness = { state: "unknown", ageMs: null, label: "Forecast issue time unknown." },
+  forecastFreshness = { basis: "retrievedAt", timestamp: null, ageMs: null, modelRunAgeMs: null, state: "unknown", label: "Retrieval time unavailable. Model run age unavailable." },
+  sourceFreshness = null,
+  metadata = null,
   windows = [],
   reason,
   limitations,
@@ -85,6 +96,9 @@ function buildResult({
     timePreference,
     preference,
     forecastFreshness,
+    ...(sourceFreshness ? { sourceFreshness } : {}),
+    freshnessPolicy: FRESHNESS_POLICY,
+    ...(metadata ? { metadata } : {}),
     windows,
     assessment,
     reason,
@@ -157,15 +171,22 @@ function dedupeHours(hours) {
   return { hours: usable, conflictingHours };
 }
 
-function evaluateHour(hour, profile) {
+// Each hour shares the forecast's retrieval time as its freshness basis, so the
+// hour's valid time is never treated as the age of the data.
+function evaluateHour(hour, profile, retrieval) {
   const decision = buildExposureDecision({
     aqi: hour.aqi,
     aqiScale: "US AQI",
     pollutants: { pm25: hour.pm25, pm10: hour.pm10 },
     weather: hour.weather,
-    observedAt: new Date(hour.startMs).toISOString(),
+    forecastValidAt: new Date(hour.startMs).toISOString(),
+    retrievedAt: retrieval.retrievedAt,
+    weatherRetrievedAt: retrieval.weatherRetrievedAt,
+    modelInitializedAt: retrieval.modelInitializedAt,
+    retrievalClockSkewToleranceMs: retrieval.clockSkewToleranceMs,
+    metadata: { isModelledEstimate: true },
     hourly: [],
-  }, profile, hour.startMs);
+  }, profile, retrieval.evaluatedAtMs);
   return decision.activityRecommendation;
 }
 
@@ -376,6 +397,32 @@ function presentWindows(selected, { timezone, placement, preference }) {
  * An optional time preference filters eligible windows in the location timezone
  * after that classification. It does not change exposure thresholds.
  */
+function combineSourceFreshness(air, weather) {
+  const rank = { fresh: 0, aging: 1, stale: 2, unknown: 3 };
+  const state = rank[air.state] >= rank[weather.state] ? air.state : weather.state;
+  const concerns = [air, weather].filter((item) => item.state === "stale" || item.state === "unknown");
+  const sameTimestamp = air.timestamp !== null && air.timestamp === weather.timestamp;
+  return {
+    basis: "retrievedAt",
+    state,
+    // A single timestamp only when both sources were actually retrieved at the
+    // same instant. Differing times stay on sourceFreshness, uncopied.
+    timestamp: sameTimestamp ? air.timestamp : null,
+    ageMs: sameTimestamp ? air.ageMs : null,
+    modelRunAgeMs: air.modelRunAgeMs ?? null,
+    label: (concerns.length ? concerns : [air, weather]).map((item) => item.label).join(" "),
+  };
+}
+
+function eligibilityReason(air, weather) {
+  const parts = [];
+  if (air.state === "stale") parts.push("Retrieved air-quality data is too old for a reliable scheduling decision.");
+  else if (air.state === "unknown") parts.push("The air-quality retrieval time is missing, invalid, or in the future.");
+  if (weather.state === "stale") parts.push("Retrieved weather data is too old for a reliable scheduling decision.");
+  else if (weather.state === "unknown") parts.push("The weather retrieval time is missing, invalid, or in the future.");
+  return parts.join(" ");
+}
+
 export function findGoWindows({ forecast = {}, profile = {}, durationMinutes, timePreference, now } = {}) {
   const evaluatedAtMs = resolveNow(now);
   const evaluatedAt = evaluatedAtMs === null ? null : new Date(evaluatedAtMs).toISOString();
@@ -388,6 +435,7 @@ export function findGoWindows({ forecast = {}, profile = {}, durationMinutes, ti
     durationMinutes: duration,
     timezone,
     evaluatedAt,
+    metadata: forecast?.metadata ?? null,
     timePreference: preference.applied ? preference.id : null,
     preference: preference.applied ? {
       id: preference.id,
@@ -410,18 +458,48 @@ export function findGoWindows({ forecast = {}, profile = {}, durationMinutes, ti
     return unavailableResult(fields, "A location timezone is required to apply a time preference.");
   }
 
-  const issuedMs = providerTimeToEpochMs(forecast?.issuedAt);
-  const forecastFreshness = issuedMs === null
-    ? { state: "unknown", ageMs: null, label: "Forecast issue time unknown." }
-    : getDataFreshness(new Date(issuedMs).toISOString(), evaluatedAtMs);
+  // Air and weather are fetched and cached separately. Each source is aged
+  // only from its own retrievedAt. Forecast valid time and model initialization
+  // time never stand in for a missing retrieval time, and one source's
+  // timestamp is never copied onto the other.
+  const modelInitializedAt = forecast?.modelInitializedAt ?? forecast?.metadata?.timestamps?.modelInitializedAt ?? null;
+  const airRetrievedAt = forecast?.airRetrievedAt !== undefined
+    ? forecast.airRetrievedAt
+    : forecast?.retrievedAt !== undefined
+      ? forecast.retrievedAt
+      : forecast?.metadata?.timestamps?.retrievedAt ?? null;
+  const weatherRetrievedAt = forecast?.weatherRetrievedAt !== undefined ? forecast.weatherRetrievedAt : null;
+  const sourceFreshness = {
+    air: {
+      source: "air",
+      ...getRetrievalFreshness(airRetrievedAt, evaluatedAtMs, {
+        modelInitializedAt,
+        clockSkewToleranceMs: CLOCK_SKEW_TOLERANCE_MS,
+        subject: "Air-quality data",
+      }),
+    },
+    weather: {
+      source: "weather",
+      ...getRetrievalFreshness(weatherRetrievedAt, evaluatedAtMs, {
+        clockSkewToleranceMs: CLOCK_SKEW_TOLERANCE_MS,
+        subject: "Weather data",
+        discloseModelRun: false,
+      }),
+    },
+  };
+  const forecastFreshness = combineSourceFreshness(sourceFreshness.air, sourceFreshness.weather);
+  fields.sourceFreshness = sourceFreshness;
+  fields.forecastFreshness = forecastFreshness;
   if (forecastFreshness.state === "stale" || forecastFreshness.state === "unknown") {
-    return unavailableResult(
-      { ...fields, forecastFreshness },
-      forecastFreshness.state === "stale"
-        ? "The forecast is too old for a reliable scheduling decision."
-        : "The forecast issue time is missing, invalid, or in the future.",
-    );
+    return unavailableResult(fields, eligibilityReason(sourceFreshness.air, sourceFreshness.weather));
   }
+  const retrieval = {
+    retrievedAt: sourceFreshness.air.timestamp,
+    weatherRetrievedAt: sourceFreshness.weather.timestamp,
+    modelInitializedAt,
+    evaluatedAtMs,
+    clockSkewToleranceMs: CLOCK_SKEW_TOLERANCE_MS,
+  };
 
   const normalized = (Array.isArray(forecast.hourly) ? forecast.hourly : []).map(normalizeHour).filter(Boolean);
   const { hours: uniqueHours, conflictingHours } = dedupeHours(normalized);
@@ -432,7 +510,7 @@ export function findGoWindows({ forecast = {}, profile = {}, durationMinutes, ti
 
   const suitableHours = [];
   for (const hour of futureHours) {
-    const recommendation = evaluateHour(hour, profile);
+    const recommendation = evaluateHour(hour, profile, retrieval);
     if (recommendation === "suitable") {
       assessment.suitableHours += 1;
       suitableHours.push(hour);
@@ -468,7 +546,8 @@ export function findGoWindows({ forecast = {}, profile = {}, durationMinutes, ti
   const preferred = selectWindows(candidates.filter(inside));
   const sharedLimitations = [
     ...BASE_LIMITATIONS,
-    forecastFreshness.state === "aging" ? forecastFreshness.label : null,
+    sourceFreshness.air.state === "aging" ? sourceFreshness.air.label : null,
+    sourceFreshness.weather.state === "aging" ? sourceFreshness.weather.label : null,
     partialData ? "Forecast hours with missing, invalid, or conflicting readings were excluded." : null,
     timezone ? null : "A valid location timezone was not supplied; timestamps are absolute UTC instants.",
   ];

@@ -8,6 +8,7 @@ import { getAQIStatus, buildRecommendationContext, buildExposureDecision } from 
 import { askGemini } from "./gemini.js";
 import { providerTimeToEpochMs, providerTimeToIso, selectCurrentAndFutureHours } from "./time.js";
 import { findGoWindows, TIME_PREFERENCES } from "./gowindow.js";
+import { buildForecastMetadata } from "./metadata.js";
 import { BoundedTTLCache, normalizeCoordinates } from "./cache.js";
 import { createRateLimiter } from "./rate-limit.js";
 
@@ -74,7 +75,7 @@ const ENVIRONMENT_CACHE_TTL_MS = Math.max(1000, Number(process.env.ENVIRONMENT_C
 const GEOCODE_CACHE_TTL_MS = Math.max(1000, Number(process.env.GEOCODE_CACHE_TTL_MS) || 24 * 60 * 60 * 1000);
 const cache = new BoundedTTLCache({ maxEntries: CACHE_MAX_ENTRIES });
 
-async function cachedFetch(url, ttlMs = ENVIRONMENT_CACHE_TTL_MS) {
+async function cachedFetchRecord(url, ttlMs = ENVIRONMENT_CACHE_TTL_MS) {
   const key = String(url);
   return cache.getOrLoad(key, ttlMs, async () => {
     const response = await fetch(key, {
@@ -82,8 +83,14 @@ async function cachedFetch(url, ttlMs = ENVIRONMENT_CACHE_TTL_MS) {
       signal: AbortSignal.timeout(10000),
     });
     if (!response.ok) throw new Error(`Data provider returned ${response.status}`);
-    return response.json();
+    const data = await response.json();
+    return { data, retrievedAt: new Date().toISOString() };
   });
+}
+
+async function cachedFetch(url, ttlMs = ENVIRONMENT_CACHE_TTL_MS) {
+  const record = await cachedFetchRecord(url, ttlMs);
+  return record.data;
 }
 
 // ---------- Trusted environmental data ----------
@@ -125,10 +132,12 @@ function finiteNonNegative(value) {
 async function fetchTrustedEnvironmentalData(latitude, longitude) {
   const normalized = normalizeCoordinates(latitude, longitude);
   const { airUrl, weatherUrl } = buildAirUrls(normalized.latitude, normalized.longitude);
-  const [air, weather] = await Promise.all([
-    cachedFetch(airUrl),
-    cachedFetch(weatherUrl),
+  const [airRecord, weatherRecord] = await Promise.all([
+    cachedFetchRecord(airUrl),
+    cachedFetchRecord(weatherUrl),
   ]);
+  const air = airRecord?.data;
+  const weather = weatherRecord?.data;
   if (!air || typeof air !== "object" || !weather || typeof weather !== "object") {
     throw new Error("Invalid provider response shape");
   }
@@ -136,7 +145,8 @@ async function fetchTrustedEnvironmentalData(latitude, longitude) {
   const rawAqi = current.us_aqi == null ? NaN : Number(current.us_aqi);
   const aqi = Number.isFinite(rawAqi) && rawAqi >= 0 ? rawAqi : null;
   const status = getAQIStatus(aqi);
-  const observedAt = providerTimeToIso(current.time, air.utc_offset_seconds);
+  const forecastValidAt = providerTimeToIso(current.time, air.utc_offset_seconds);
+  const metadata = buildForecastMetadata({ air, retrievedAt: airRecord.retrievedAt });
   const hours = selectCurrentAndFutureHours(
     air.hourly,
     current.time,
@@ -145,7 +155,11 @@ async function fetchTrustedEnvironmentalData(latitude, longitude) {
   );
   return {
     location: { ...normalized, timezone: air.timezone || "UTC" },
-    observedAt,
+    observedAt: forecastValidAt,
+    forecastValidAt,
+    retrievedAt: metadata.timestamps.retrievedAt,
+    modelInitializedAt: metadata.timestamps.modelInitializedAt,
+    metadata,
     aqi,
     aqiScale: "US AQI",
     status,
@@ -155,6 +169,7 @@ async function fetchTrustedEnvironmentalData(latitude, longitude) {
       carbonMonoxide: finiteNonNegative(current.carbon_monoxide), sulphurDioxide: finiteNonNegative(current.sulphur_dioxide),
     },
     weather: weather.current || {},
+    weatherRetrievedAt: weatherRecord.retrievedAt ?? null,
     hourly: hours,
     source: "Open-Meteo / CAMS",
     attribution: "Air quality estimates are model-based and may differ from local regulatory monitoring stations.",
@@ -186,15 +201,25 @@ function hourlyWeatherByTime(weather, utcOffsetSeconds) {
   return byTime;
 }
 
-function toGoWindowForecast(air, weather) {
+function toGoWindowForecast(air, weather, retrieval = {}) {
   const current = air?.current || {};
-  const issuedAt = providerTimeToIso(current.time, air?.utc_offset_seconds);
+  const forecastValidAt = providerTimeToIso(current.time, air?.utc_offset_seconds);
+  // retrievedAt remains the air-quality retrieval time. The weather response
+  // keeps its own timestamp; a cache hit on one URL must not restamp the other.
+  const airRetrievedAt = retrieval.airRetrievedAt ?? retrieval.retrievedAt ?? null;
+  const weatherRetrievedAt = retrieval.weatherRetrievedAt ?? null;
+  const metadata = buildForecastMetadata({ air, retrievedAt: airRetrievedAt });
   const hours = selectCurrentAndFutureHours(air?.hourly, current.time, air?.utc_offset_seconds, 12);
   const weatherOffset = weather?.utc_offset_seconds ?? air?.utc_offset_seconds;
   const weatherByTime = hourlyWeatherByTime(weather, weatherOffset);
   return {
     timezone: typeof air?.timezone === "string" ? air.timezone : null,
-    issuedAt,
+    forecastValidAt,
+    modelInitializedAt: metadata.timestamps.modelInitializedAt,
+    retrievedAt: airRetrievedAt,
+    airRetrievedAt,
+    weatherRetrievedAt,
+    metadata,
     hourly: hours.map((hour) => {
       const conditions = weatherByTime.get(hour.time);
       return conditions ? { ...hour, weather: conditions } : hour;
@@ -206,14 +231,19 @@ async function fetchTrustedForecast(latitude, longitude) {
   const normalized = normalizeCoordinates(latitude, longitude);
   const { airUrl } = buildAirUrls(normalized.latitude, normalized.longitude);
   const weatherUrl = buildForecastWeatherUrl(normalized.latitude, normalized.longitude);
-  const [air, weather] = await Promise.all([
-    cachedFetch(airUrl),
-    cachedFetch(weatherUrl),
+  const [airRecord, weatherRecord] = await Promise.all([
+    cachedFetchRecord(airUrl),
+    cachedFetchRecord(weatherUrl),
   ]);
+  const air = airRecord?.data;
+  const weather = weatherRecord?.data;
   if (!air || typeof air !== "object" || !weather || typeof weather !== "object") {
     throw new Error("Invalid provider response shape");
   }
-  return toGoWindowForecast(air, weather);
+  return toGoWindowForecast(air, weather, {
+    airRetrievedAt: airRecord.retrievedAt,
+    weatherRetrievedAt: weatherRecord.retrievedAt,
+  });
 }
 
 // ---------- Input validation ----------

@@ -42,6 +42,10 @@ globalThis.fetch = async (url, options) => {
     return {
       ok: true,
       json: async () => ({
+        latitude: 17.400002,
+        longitude: 78.50001,
+        elevation: 505.0,
+        generationtime_ms: 0.52,
         current: {
           time: observed,
           us_aqi: 172, // authoritative server-side value
@@ -150,6 +154,46 @@ test("air-quality endpoint returns consistent JSON error on bad coords", async (
   const res = await request(app, { method: "GET", url: "/api/air-quality?lat=999&lon=77" });
   assert.equal(res.status, 400);
   assert.match(res.body.error, /latitude and longitude/i);
+});
+
+test("air-quality endpoint preserves provider cell metadata, honest timestamps, and cached retrievedAt", async () => {
+  const first = await request(app, { method: "GET", url: "/api/air-quality?lat=17.381&lon=78.489" });
+  assert.equal(first.status, 200);
+  assert.equal(first.body.forecastValidAt, "2026-11-25T15:00:00.000Z");
+  assert.equal(first.body.modelInitializedAt, null);
+  assert.ok(first.body.retrievedAt);
+  assert.notEqual(first.body.retrievedAt, first.body.forecastValidAt);
+  assert.equal(first.body.metadata.providerCell.latitude, 17.400002);
+  assert.equal(first.body.metadata.providerCell.longitude, 78.50001);
+  assert.equal(first.body.metadata.providerCell.elevationMeters, 505);
+  assert.equal(first.body.metadata.spatialResolution.verified, true);
+  assert.equal(first.body.metadata.spatialResolution.nominalDegrees, 0.4);
+  assert.equal(first.body.metadata.spatialResolution.approximateKm, 45);
+  assert.equal(first.body.metadata.modelRunAge.available, false);
+  assert.equal(first.body.metadata.isStationObservation, false);
+  assert.equal(
+    first.body.metadata.disclosure,
+    "Modelled air-quality estimate · CAMS global model · Approx. 45 km nominal resolution.",
+  );
+
+  // Cache hit preserves original retrieval timestamp rather than fabricating a newer fetch time.
+  await new Promise((resolve) => setTimeout(resolve, 15));
+  const cached = await request(app, { method: "GET", url: "/api/air-quality?lat=17.384&lon=78.491" });
+  assert.equal(cached.status, 200);
+  assert.equal(cached.body.retrievedAt, first.body.retrievedAt);
+  assert.equal(cached.body.weatherRetrievedAt, first.body.weatherRetrievedAt);
+  assert.equal(cached.body.metadata.providerCell.cellKey, first.body.metadata.providerCell.cellKey);
+
+  const airKey = [...cache.entries.keys()].find((key) => key.includes("air-quality-api.open-meteo.com"));
+  const weatherKey = [...cache.entries.keys()].find((key) => key.includes("api.open-meteo.com/v1/forecast") && !key.includes("hourly="));
+  cache.entries.get(airKey).value.retrievedAt = "2026-11-25T20:00:00.000Z";
+  cache.entries.get(weatherKey).value.retrievedAt = "2026-11-25T20:40:00.000Z";
+  upstreamCalls = [];
+  const preserved = await request(app, { method: "GET", url: "/api/air-quality?lat=17.384&lon=78.491" });
+  assert.deepEqual(upstreamCalls, []);
+  assert.equal(preserved.body.retrievedAt, "2026-11-25T20:00:00.000Z");
+  assert.equal(preserved.body.weatherRetrievedAt, "2026-11-25T20:40:00.000Z");
+  assert.notEqual(preserved.body.retrievedAt, preserved.body.weatherRetrievedAt);
 });
 
 test("nearby environmental coordinates share normalized upstream cache keys", async () => {

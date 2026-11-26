@@ -31,8 +31,19 @@ function isProlonged(activity) { return PROLONGED_ACTIVITIES.has(activity.toLowe
 function isChildActivity(activity) { return CHILD_ACTIVITIES.has(activity.toLowerCase()); }
 
 // ---------- Data freshness ----------
-const FRESH_MS = 30 * 60 * 1000; // 30 minutes
-const STALE_MS = 3 * 60 * 60 * 1000; // 3 hours
+// 30 minutes and 3 hours are AirSense policy thresholds, not provider
+// guarantees. Open-Meteo does not document these ages. Forecast valid time is
+// never an input to either threshold.
+const FRESH_MS = 30 * 60 * 1000;
+const STALE_MS = 3 * 60 * 60 * 1000;
+export const RETRIEVAL_FRESH_MS = FRESH_MS;
+export const RETRIEVAL_STALE_MS = STALE_MS;
+// A retrieval timestamp stamped by another clock may sit slightly ahead.
+// This matches the client allowance in src/reliability.ts. The current-air
+// gate uses it unless a caller sets retrievalClockSkewToleranceMs. GoWindow
+// and the wind adjustment apply the same allowance. Forecast valid time and
+// model initialization time are never retrieval times.
+export const CLOCK_SKEW_TOLERANCE_MS = 5 * 60 * 1000;
 
 function resolveEvaluationTime(now) {
   if (now === undefined) return Date.now();
@@ -40,6 +51,18 @@ function resolveEvaluationTime(now) {
   return Number.isFinite(value) ? value : null;
 }
 
+function parseTimestamp(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const ms = new Date(value).getTime();
+  return Number.isFinite(ms) ? ms : null;
+}
+
+function formatAge(ageMs) {
+  const minutes = Math.round(ageMs / 60000);
+  return minutes < 60 ? `${minutes} min` : `${Math.round(ageMs / 3600000)}h`;
+}
+
+// Station-style observations: age is measured from the observation time.
 export function getDataFreshness(observedAt, now) {
   if (!observedAt) return { state: "unknown", ageMs: null, label: "Observation time unknown." };
   const evaluatedAt = resolveEvaluationTime(now);
@@ -49,6 +72,90 @@ export function getDataFreshness(observedAt, now) {
   if (age <= FRESH_MS) return { state: "fresh", ageMs: age, label: `Observed ${Math.round(age / 60000)} min ago.` };
   if (age <= STALE_MS) return { state: "aging", ageMs: age, label: `Observed ${Math.round(age / 60000)} min ago — may not reflect current conditions.` };
   return { state: "stale", ageMs: age, label: `Observed ${Math.round(age / 3600000)}h ago — too old for reliable decisions.` };
+}
+
+// Modelled forecasts: age is measured only from when AirSense retrieved the
+// provider response. Forecast valid time says when a value applies, not how
+// old it is, and is never used to age the data. Model run age is reported
+// only from a genuine provider-supplied initialization time and never gates.
+function retrievalLabel({ state, ageMs, subject, modelRunText, discloseModelRun }) {
+  let text;
+  if (state === "missing") text = subject ? `${subject} retrieval time unavailable.` : "Retrieval time unavailable.";
+  else if (state === "invalid") text = subject ? `${subject} retrieval time is invalid.` : "Retrieval time invalid.";
+  else if (state === "fresh") {
+    text = subject
+      ? `${subject} retrieved ${formatAge(ageMs)} ago.`
+      : `Forecast estimate retrieved ${formatAge(ageMs)} ago.`;
+  } else if (state === "aging") {
+    text = subject
+      ? `${subject} retrieved ${formatAge(ageMs)} ago — may not reflect current conditions.`
+      : `Forecast estimate retrieved ${formatAge(ageMs)} ago — may not reflect current conditions.`;
+  } else {
+    text = subject
+      ? `${subject} retrieved ${formatAge(ageMs)} ago — too old for reliable decisions.`
+      : `Retrieved data is ${formatAge(ageMs)} old — too old for reliable decisions.`;
+  }
+  if (!discloseModelRun) return text;
+  return `${text} ${modelRunText}`;
+}
+
+export function getRetrievalFreshness(retrievedAt, now, {
+  modelInitializedAt = null,
+  clockSkewToleranceMs = 0,
+  subject = null,
+  discloseModelRun = true,
+} = {}) {
+  const base = { basis: "retrievedAt", timestamp: null, ageMs: null, modelRunAgeMs: null };
+  const evaluatedAt = resolveEvaluationTime(now);
+  const retrievedMs = parseTimestamp(retrievedAt);
+  const initMs = parseTimestamp(modelInitializedAt);
+  const modelRunAgeMs = evaluatedAt !== null && initMs !== null && evaluatedAt >= initMs ? evaluatedAt - initMs : null;
+  const modelRunText = modelRunAgeMs === null
+    ? "Model run age unavailable."
+    : `Model run initialized ${formatAge(modelRunAgeMs)} ago.`;
+  const finish = (state, extra = {}) => ({
+    ...base,
+    ...extra,
+    modelRunAgeMs,
+    state: state === "missing" || state === "invalid" ? "unknown" : state,
+    label: retrievalLabel({ state, ageMs: extra.ageMs, subject, modelRunText, discloseModelRun }),
+  });
+  if (retrievedMs === null) return finish("missing");
+  const timestamp = new Date(retrievedMs).toISOString();
+  const skew = Math.max(0, Number(clockSkewToleranceMs) || 0);
+  if (evaluatedAt === null || retrievedMs - evaluatedAt > skew) return finish("invalid", { timestamp });
+  const ageMs = Math.max(0, evaluatedAt - retrievedMs);
+  if (ageMs <= FRESH_MS) return finish("fresh", { timestamp, ageMs });
+  if (ageMs <= STALE_MS) return finish("aging", { timestamp, ageMs });
+  return finish("stale", { timestamp, ageMs });
+}
+
+function resolveDecisionFreshness(air, now) {
+  if (!air.metadata?.isModelledEstimate) return getDataFreshness(air.observedAt, now);
+  const validAt = air.forecastValidAt ?? air.metadata?.timestamps?.forecastValidAt ?? null;
+  const retrievedAt = air.retrievedAt ?? air.metadata?.timestamps?.retrievedAt ?? null;
+  const modelInitializedAt = air.modelInitializedAt ?? air.metadata?.timestamps?.modelInitializedAt ?? null;
+  if (parseTimestamp(validAt) === null) {
+    return { basis: "retrievedAt", timestamp: null, ageMs: null, modelRunAgeMs: null, state: "unknown", label: "Forecast valid time unavailable." };
+  }
+  return getRetrievalFreshness(retrievedAt, now, {
+    modelInitializedAt,
+    clockSkewToleranceMs: air.retrievalClockSkewToleranceMs ?? CLOCK_SKEW_TOLERANCE_MS,
+  });
+}
+
+// The overview and the recommendation context use these same sentences when a
+// reported AQI cannot support a current activity decision.
+export function insufficientExposureGuidance(freshness) {
+  const modelled = freshness?.basis === "retrievedAt";
+  if (freshness?.state === "stale") {
+    return modelled
+      ? "Refresh the data or check a local monitoring station. The retrieved forecast data is too old."
+      : "Refresh the data or check a local monitoring station. Available readings are too old.";
+  }
+  return modelled
+    ? "Check a local regulatory monitoring station. The forecast valid time or retrieval time is missing, invalid, or in the future."
+    : "Check a local regulatory monitoring station. The observation time is missing, invalid, or in the future.";
 }
 
 // ---------- Exposure decision engine ----------
@@ -63,7 +170,8 @@ export function buildExposureDecision(air = {}, profile = {}, now) {
   const sensitivity = String(profile.sensitivity || "general");
   const isSensitive = sensitivity !== "general" || ageGroup === "child" || ageGroup === "older adult";
   const isChild = ageGroup === "child" || isChildActivity(activity);
-  const freshness = getDataFreshness(air.observedAt, now);
+  const freshness = resolveDecisionFreshness(air, now);
+  const modelled = freshness.basis === "retrievedAt";
   const hourly = Array.isArray(air.hourly) && air.hourly.length > 0 ? air.hourly : null;
   const hasForecast = hourly !== null && hourly.some((h) => h.aqi !== null);
 
@@ -77,6 +185,7 @@ export function buildExposureDecision(air = {}, profile = {}, now) {
       sensitiveGroupAdvice: isSensitive ? "Without current data, sensitive individuals should avoid prolonged outdoor exertion as a precaution." : "No specific guidance available without data.",
       alternativeActivity: "Consider indoor activities until current readings resume.",
       dataFreshness: freshness,
+      wind: assessWind(air, now),
       limitations: "AQI unavailable from provider. No forecast or historical trend can substitute for current readings. Always follow official local public-health advisories.",
     };
   }
@@ -84,15 +193,18 @@ export function buildExposureDecision(air = {}, profile = {}, now) {
     return {
       overallRisk: "unknown",
       activityRecommendation: "insufficient_data",
-      recommendedAction: freshness.state === "stale"
-        ? "Refresh the data or check a local monitoring station. Available readings are too old."
-        : "Check a local regulatory monitoring station. The observation time is missing, invalid, or in the future.",
+      recommendedAction: insufficientExposureGuidance(freshness),
       reasoning: freshness.state === "stale"
-        ? `Readings are ${Math.round(freshness.ageMs / 3600000)} hours old. Air quality can change significantly within hours.`
-        : "A trustworthy observation time is required before making a current environmental exposure recommendation.",
+        ? modelled
+          ? `Forecast data was retrieved ${Math.round(freshness.ageMs / 3600000)} hours ago. Air quality can change significantly within hours.`
+          : `Readings are ${Math.round(freshness.ageMs / 3600000)} hours old. Air quality can change significantly within hours.`
+        : modelled
+          ? "A trustworthy forecast valid time and retrieval time are required before making a current environmental exposure recommendation."
+          : "A trustworthy observation time is required before making a current environmental exposure recommendation.",
       sensitiveGroupAdvice: isSensitive ? "Treat unverified data with extra caution and consult official local guidance." : "Refresh for a time-verified reading.",
       alternativeActivity: "Consider indoor activities until time-verified environmental data is available.",
       dataFreshness: freshness,
+      wind: assessWind(air, now),
       limitations: `Data freshness (${freshness.state}) prevents a reliable environmental exposure assessment. This is not medical advice; follow official local public-health advisories.`,
     };
   }
@@ -114,9 +226,10 @@ export function buildExposureDecision(air = {}, profile = {}, now) {
   if (isSensitive) riskScore += 1;
   if (isChild) riskScore += 0.5;
 
-  // Weather: low wind stagnation
-  const windSpeed = Number(air.weather?.wind_speed_10m);
-  if (Number.isFinite(windSpeed) && windSpeed < 5) riskScore += 0.5;
+  // Wind below 5 km/h adds 0.5 only when this weather response has its own
+  // usable retrieval time. The air-quality retrievedAt is never a substitute.
+  const wind = assessWind(air, now);
+  if (wind.points) riskScore += wind.points;
 
   // Forecast trend is context only. Forecasts must never change the current
   // exposure recommendation, which is based on current observed/modelled data.
@@ -202,6 +315,7 @@ export function buildExposureDecision(air = {}, profile = {}, now) {
     `Activity: ${activity}${isVigorous(activity) ? " (vigorous)" : isProlonged(activity) ? " (prolonged)" : ""}.`,
     isSensitive ? "Profile indicates elevated sensitivity." : null,
     freshness.state === "aging" ? freshness.label : null,
+    wind.disclosure,
     forecastNote || null,
   ].filter(Boolean);
 
@@ -221,7 +335,81 @@ export function buildExposureDecision(air = {}, profile = {}, now) {
     sensitiveGroupAdvice,
     alternativeActivity,
     dataFreshness: freshness,
+    wind,
     limitations: limitations.join(" "),
+  };
+}
+
+// AirSense policy, shared with GoWindow: fresh through 30 minutes, aging through
+// 3 hours, stale after that. A weather timestamp up to 5 minutes ahead is
+// clock skew. These ages are not provider guarantees.
+function formatWindSpeed(windSpeedKmh) {
+  const rounded = Math.round(windSpeedKmh * 10) / 10;
+  return Number.isInteger(rounded) ? String(rounded) : String(rounded);
+}
+
+function formatWindRetrieved(ageMs) {
+  const minutes = Math.round(ageMs / 60000);
+  if (minutes < 1) return "Retrieved just now.";
+  if (minutes < 60) return `Retrieved ${minutes} ${minutes === 1 ? "minute" : "minutes"} ago.`;
+  const hours = Math.round(ageMs / 3600000);
+  return `Retrieved ${hours} ${hours === 1 ? "hour" : "hours"} ago.`;
+}
+
+function windScoreSentence(speed, points) {
+  return points > 0
+    ? `Wind of ${speed} km/h increased the exposure score by 0.5 points.`
+    : `Wind of ${speed} km/h was considered; no score adjustment was needed.`;
+}
+
+function assessWind(air, now) {
+  const raw = air.weather?.wind_speed_10m;
+  const parsed = raw === null || raw === undefined || raw === "" ? null : Number(raw);
+  const windSpeedKmh = parsed !== null && Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+  const freshness = getRetrievalFreshness(air.weatherRetrievedAt ?? null, now, {
+    clockSkewToleranceMs: CLOCK_SKEW_TOLERANCE_MS,
+    subject: "Weather data",
+    discloseModelRun: false,
+  });
+  const base = { windSpeedKmh, freshness, basis: "weatherRetrievedAt" };
+  if (windSpeedKmh === null) {
+    return {
+      ...base,
+      applied: false,
+      points: 0,
+      state: "excluded_missing_wind",
+      disclosure: "Wind was unavailable and was not used in the exposure score. Missing wind is not treated as favorable.",
+    };
+  }
+  const speed = formatWindSpeed(windSpeedKmh);
+  if (freshness.state === "unknown") {
+    return {
+      ...base,
+      applied: false,
+      points: 0,
+      state: "excluded_retrieval_time",
+      disclosure: `Wind of ${speed} km/h was excluded from scoring because the weather retrieval time is missing, invalid, or in the future.`,
+    };
+  }
+  if (freshness.state === "stale") {
+    return {
+      ...base,
+      applied: false,
+      points: 0,
+      state: "excluded_stale",
+      disclosure: `Wind of ${speed} km/h was excluded from scoring because the weather data is too old. ${formatWindRetrieved(freshness.ageMs)}`,
+    };
+  }
+  const stagnant = windSpeedKmh < 5;
+  const points = stagnant ? 0.5 : 0;
+  const state = freshness.state === "aging" ? "included_aging" : "included";
+  const agingNote = state === "included_aging" ? " The reading may not reflect current conditions." : "";
+  return {
+    ...base,
+    applied: true,
+    points,
+    state,
+    disclosure: `${windScoreSentence(speed, points)} ${formatWindRetrieved(freshness.ageMs)}${agingNote}`,
   };
 }
 
@@ -257,8 +445,112 @@ export function buildRecommendationContext(air = {}, profile = {}, question = ""
   if (valid && aqi > 100 && (sensitivity !== "general" || ageGroup === "child" || ageGroup === "older adult")) {
     recommendation += " Take extra care because the selected profile may be more sensitive to air pollution.";
   }
+  // Category text classifies the reported number. It is not the activity
+  // recommendation once the exposure engine has refused a current decision.
+  if (decision?.activityRecommendation === "insufficient_data") {
+    recommendation = decision.recommendedAction || insufficientExposureGuidance(decision.dataFreshness);
+  }
   const answer = decision
     ? buildDeterministicAnswer(air, decision)
     : `${valid ? `The reported ${air.aqiScale || "AQI"} is ${aqi} (${status.label}).` : "Current air quality data is unavailable."} ${recommendation} ${air.pollutants?.pm25 != null ? `PM2.5 is ${air.pollutants.pm25} µg/m³.` : ""} ${air.attribution || ""}`.trim();
-  return { aqi: valid ? aqi : null, category: status.label, activity, sensitivity, ageGroup, recommendation, question, answer };
+  return {
+    aqi: valid ? aqi : null,
+    category: status.label,
+    categoryDescription: valid ? status.advice : null,
+    activity,
+    sensitivity,
+    ageGroup,
+    recommendation,
+    question,
+    answer,
+  };
+}
+
+function validReading(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? number : null;
+}
+
+function claimSentence(text) {
+  const value = String(text || "").trim();
+  if (!value) return "";
+  return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+// Server-authored explanation claims. Gemini may cite these IDs and cannot
+// supply the sentences. A claim is absent whenever its source fact is missing
+// or its freshness state does not allow it.
+export function buildExplanationClaims(air = {}, decision = null) {
+  if (!decision || typeof decision !== "object") return [];
+  const claims = [];
+  const insufficient = decision.activityRecommendation === "insufficient_data";
+  const modelled = decision.dataFreshness?.basis === "retrievedAt" || air.metadata?.isModelledEstimate === true;
+  if (modelled) {
+    claims.push({
+      id: "modelled_estimate",
+      text: "These air-quality values are modelled estimates, not station observations.",
+    });
+  }
+
+  const aqi = validReading(air.aqi);
+  if (aqi !== null) {
+    const status = getAQIStatus(aqi);
+    const scale = air.aqiScale || "US AQI";
+    const classification = `The reported ${scale} is ${aqi} (${status.label}).`;
+    const readingKind = modelled ? "modelled number" : "reported number";
+    claims.push({
+      id: "us_aqi",
+      text: insufficient
+        ? `${classification} This classifies the ${readingKind} and is not a current activity recommendation.`
+        : classification,
+    });
+  }
+
+  const pm25 = validReading(air.pollutants?.pm25);
+  if (pm25 !== null) {
+    const status = getPM25Status(pm25);
+    claims.push({
+      id: "pm25",
+      text: `PM2.5 is ${pm25} µg/m³ (${status.label}).`,
+    });
+  }
+
+  const wind = decision.wind;
+  const windState = wind?.state;
+  if ((windState === "included" || windState === "included_aging") && wind.points > 0) {
+    claims.push({ id: "wind_adjustment", text: wind.disclosure });
+  } else if ((windState === "included" || windState === "included_aging") && wind.points === 0) {
+    claims.push({ id: "wind_considered", text: wind.disclosure });
+  } else if (windState === "excluded_stale" || windState === "excluded_retrieval_time" || windState === "excluded_missing_wind") {
+    claims.push({ id: "wind_excluded", text: wind.disclosure });
+  }
+  if (windState === "included_aging") {
+    const aging = wind.freshness?.label
+      ? claimSentence(wind.freshness.label)
+      : "The weather reading may not reflect current conditions.";
+    claims.push({ id: "weather_aging", text: aging });
+  }
+
+  if (insufficient) {
+    claims.push({
+      id: "insufficient_data",
+      text: claimSentence(decision.recommendedAction) || insufficientExposureGuidance(decision.dataFreshness),
+    });
+  } else if (decision.activityRecommendation && decision.recommendedAction) {
+    const label = String(decision.activityRecommendation).replaceAll("_", " ");
+    claims.push({
+      id: "activity_recommendation",
+      text: `Environmental exposure recommendation: ${label}. ${claimSentence(decision.recommendedAction)}`,
+    });
+  }
+
+  if (typeof decision.reasoning === "string" && decision.reasoning.trim()) {
+    claims.push({ id: "decision_reasoning", text: decision.reasoning.trim() });
+  }
+  claims.push({
+    id: "not_medical_advice",
+    text: "This is an environmental exposure recommendation, not medical advice.",
+  });
+  return claims;
 }

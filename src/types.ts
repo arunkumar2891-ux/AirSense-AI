@@ -1,3 +1,43 @@
+export type ProviderCell = {
+  latitude: number;
+  longitude: number;
+  elevationMeters: number | null;
+  cellKey: string;
+};
+
+export type ForecastMetadata = {
+  dataClass: "modelled_estimate";
+  isModelledEstimate: boolean;
+  isStationObservation: boolean;
+  provider: string;
+  providerCell: ProviderCell | null;
+  model: {
+    id: string | null;
+    name: string | null;
+    providerSupplied: boolean;
+    basis: string;
+  };
+  spatialResolution: {
+    nominalDegrees: number | null;
+    approximateKm: number | null;
+    verified: boolean;
+    label: string | null;
+    servingCellBehavior: string | null;
+  };
+  timestamps: {
+    forecastValidAt: string | null;
+    modelInitializedAt: string | null;
+    retrievedAt: string | null;
+  };
+  modelRunAge: {
+    available: boolean;
+    ageMs: number | null;
+    label: string;
+  };
+  disclosure: string;
+  accuracyNotice: string;
+};
+
 export type AirData = {
   aqi: number | null;
   aqiScale: string;
@@ -11,9 +51,14 @@ export type AirData = {
     sulphurDioxide: number | null;
   };
   weather: Record<string, number | string>;
+  weatherRetrievedAt?: string | null;
   location: { latitude: number; longitude: number; timezone: string };
   hourly: { time: string; aqi: number | null; pm25: number | null; pm10: number | null }[];
   observedAt: string | null;
+  forecastValidAt?: string | null;
+  retrievedAt?: string | null;
+  modelInitializedAt?: string | null;
+  metadata?: ForecastMetadata;
   source: string;
   attribution: string;
 };
@@ -35,6 +80,15 @@ export type ExposureDecision = {
   sensitiveGroupAdvice: string;
   alternativeActivity: string;
   dataFreshness: { state: string; ageMs: number | null; label: string };
+  wind?: {
+    applied: boolean;
+    points: number;
+    state: string;
+    windSpeedKmh: number | null;
+    disclosure: string;
+    basis?: "weatherRetrievedAt";
+    freshness?: { state: string; ageMs: number | null; label: string; timestamp?: string | null; basis?: string };
+  };
   limitations: string;
 };
 
@@ -67,7 +121,23 @@ export type GoWindowPreference = {
   outcome: "within" | "outside" | "any" | null;
 };
 
-export type GoWindowFreshness = { state: string; ageMs: number | null; label: string };
+export type GoWindowFreshness = {
+  state: string;
+  ageMs: number | null;
+  label: string;
+  basis?: "retrievedAt";
+  timestamp?: string | null;
+  modelRunAgeMs?: number | null;
+  source?: "air" | "weather";
+};
+
+export type GoWindowFreshnessPolicy = {
+  basis: "retrievedAt";
+  freshWithinMs: number;
+  staleAfterMs: number;
+  clockSkewToleranceMs: number;
+  note: string;
+};
 
 export type GoWindowResult = {
   start: string;
@@ -115,6 +185,12 @@ export type GoWindowResponse = {
   preference?: GoWindowPreference | null;
   evaluatedAt: string | null;
   forecastFreshness: GoWindowFreshness;
+  sourceFreshness?: {
+    air: GoWindowFreshness;
+    weather: GoWindowFreshness;
+  };
+  freshnessPolicy?: GoWindowFreshnessPolicy;
+  metadata?: ForecastMetadata;
   windows: GoWindowResult[];
   assessment?: GoWindowAssessment;
   reason: string;

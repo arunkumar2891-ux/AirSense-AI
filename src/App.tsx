@@ -3,7 +3,7 @@ import { Activity, ArrowUpRight, Bot, Clock, Cloud, Compass, Crosshair, Leaf, Ma
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { askAssistant, findGoWindow, getAirQuality, reverseGeocode, searchLocations } from "./api";
 import type { AirData, ExposureDecision, GoWindowResponse, GoWindowTimePreference, LocationResult, Profile } from "./types";
-import { getAqiPresentation, getFreshnessPresentation, isLatestRequest, shouldApplyGpsResult, US_AQI_CATEGORIES } from "./reliability";
+import { describeCurrentActivityGuidance, describeWindUse, formatReportedWindSpeed, formatSourceDisclosure, formatTimingDisclosure, getAqiPresentation, getFreshnessPresentation, isLatestRequest, shouldApplyGpsResult, US_AQI_CATEGORIES } from "./reliability";
 import { buildGoWindowRequest, DEFAULT_GO_WINDOW_DURATION, DEFAULT_TIME_PREFERENCE, goWindowRequestKey } from "./gowindow";
 import GoWindowPanel from "./GoWindowPanel";
 import ThemeSelector from "./ThemeSelector";
@@ -82,6 +82,12 @@ function App() {
   const [scheduleKey, setScheduleKey] = useState("");
   const [scheduleLoading, setScheduleLoading] = useState(false);
   const [scheduleError, setScheduleError] = useState("");
+  const [clockNow, setClockNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setClockNow(Date.now()), 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   // Location UX state
   const [showGeoBanner, setShowGeoBanner] = useState(false);
@@ -358,15 +364,35 @@ function App() {
 
   const aqi = air?.aqi;
   const aqiPresentation = getAqiPresentation(aqi);
+  const forecastValidAt = air?.forecastValidAt ?? air?.observedAt ?? null;
+  const modelInitializedAt = air?.modelInitializedAt ?? air?.metadata?.timestamps?.modelInitializedAt ?? null;
+  const retrievedAt = air?.retrievedAt ?? air?.metadata?.timestamps?.retrievedAt ?? null;
   const freshness = aqiPresentation.value === null
-    ? { state: "unavailable", label: "DATA UNAVAILABLE", isFresh: false }
-    : getFreshnessPresentation(air?.observedAt);
+    ? { state: "unavailable", label: "DATA UNAVAILABLE" }
+    : getFreshnessPresentation({ forecastValidAt, modelInitializedAt, retrievedAt }, clockNow);
   const tone = aqiPresentation.color;
   const dataStatus = loading
-    ? { state: "loading", label: "LOADING MODEL DATA" }
+    ? { state: "loading", label: "LOADING ESTIMATE" }
     : error
       ? { state: "error", label: "DATA ERROR" }
       : freshness;
+  const timingDisclosure = air
+    ? formatTimingDisclosure({
+      forecastValidAt,
+      modelInitializedAt,
+      retrievedAt,
+      timezone: air.location.timezone,
+      now: clockNow,
+    })
+    : null;
+  const sourceDisclosure = formatSourceDisclosure(air?.metadata, air?.source);
+  const windNote = air ? describeWindUse({ windSpeedKmh: air.weather?.wind_speed_10m, weatherRetrievedAt: air.weatherRetrievedAt }, clockNow) : null;
+  const activityCopy = describeCurrentActivityGuidance({
+    categoryLabel: aqiPresentation.label,
+    categoryAdvice: air?.status.advice,
+    freshnessState: aqiPresentation.value === null ? null : freshness.state,
+  });
+  const showNonStationSubnote = Boolean(air?.metadata?.spatialResolution?.verified);
   const displayDate = formatDateAtLocation(air?.location.timezone);
   return <div className="app-shell">
     <header className="site-header">
@@ -427,7 +453,7 @@ function App() {
           <span className={`source-badge ${loc.source}`}>{loc.source === "gps" ? "GPS" : loc.source === "manual" ? "SELECTED" : "DEFAULT"}</span>
           <span className={`data-status ${dataStatus.state}`} role="status">{dataStatus.label}</span>
         </div>
-        <span className="muted">{air?.observedAt ? `Updated ${formatAtLocation(air.observedAt, air.location.timezone, { hour: "2-digit", minute: "2-digit" })}` : "Observation time unavailable"}</span>
+        <span className="muted location-timing">{loading ? "Loading forecast timing…" : timingDisclosure ? timingDisclosure.summary : "Forecast timing unavailable"}</span>
       </section>
 
       {geoNotice && <div className="notice-banner" role="status">{geoNotice}</div>}
@@ -436,21 +462,26 @@ function App() {
         <ContextMetric label="Temperature" value={formatWeatherValue(air?.weather.temperature_2m, "°C")}/>
         <ContextMetric label="Feels like" value={formatWeatherValue(air?.weather.apparent_temperature, "°C")}/>
         <ContextMetric label="Humidity" value={formatWeatherValue(air?.weather.relative_humidity_2m, "%")}/>
-        <ContextMetric label="Wind" value={formatWeatherValue(air?.weather.wind_speed_10m, " km/h")}/>
+        <ContextMetric label="Wind" value={formatReportedWindSpeed(air?.weather.wind_speed_10m)}/>
+        {windNote && <p className={`weather-note ${windNote.tone}`}>{windNote.text}</p>}
       </section>
       <section className="hero-grid" aria-label="Current air quality">
         <div className={`aqi-card ${tone}`}>
           <div className="card-top"><span className="section-kicker">CURRENT MODELLED AIR QUALITY</span><span className={`data-status ${dataStatus.state}`}>{dataStatus.label}</span></div>
           <div className="aqi-main"><div><div className="aqi-number">{loading ? "…" : aqi ?? "N/A"}</div><div className="aqi-unit">US AQI · 0–500 SCALE</div></div><div className="aqi-ring" aria-label={`Severity level ${aqiPresentation.level || "unavailable"} of 6`}><div><Wind size={28}/><b>{aqiPresentation.level ? `${aqiPresentation.level} / 6` : "N/A"}</b></div></div></div>
           <h2>{loading ? "Loading environmental estimates…" : aqiPresentation.label}</h2>
-          <p>{error ? "Current environmental estimates could not be loaded. Try again shortly." : aqiPresentation.value === null ? "No current US AQI reading is available. Check an official local monitor." : air?.status.advice}</p>
+          {activityCopy.blocked && activityCopy.categoryNote && <p className="aqi-classification">{activityCopy.categoryNote}</p>}
+          <p>{error ? "Current environmental estimates could not be loaded. Try again shortly." : aqiPresentation.value === null ? "No current US AQI reading is available. Check an official local monitor." : activityCopy.guidance}</p>
           <div className="scale" aria-label="US AQI category scale from 0 to 500"><div className="scale-bar">{aqiPresentation.markerPercent !== null && <i aria-hidden="true" style={{ left: `${aqiPresentation.markerPercent}%` }}/>}</div><div className="scale-labels">{US_AQI_CATEGORIES.map((category) => <span key={category.label}><b>{category.label}</b><small>{category.min}–{category.max}</small></span>)}</div></div>
-          <div className="source-note">Source: {air?.source || "Open-Meteo"} · Model estimate</div>
+          <div className="source-disclosure">
+            <span>{sourceDisclosure}</span>
+            {showNonStationSubnote && <small>Not a neighborhood monitoring station observation.</small>}
+          </div>
         </div>
         <div className="insight-card">
           <div className="card-heading"><div><span className="section-kicker">MODELLED HOURLY ESTIMATES</span><h3>Next 12 hours</h3></div><span className="mini-icon"><Activity size={17}/></span></div>
           <div className="chart-wrap">{chartData.length ? <ResponsiveContainer width="100%" height="100%"><AreaChart data={chartData}><defs><linearGradient id="aqiFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="var(--blue-readable)" stopOpacity={0.2}/><stop offset="100%" stopColor="var(--blue-readable)" stopOpacity={0}/></linearGradient></defs><CartesianGrid stroke="var(--chart-grid)" vertical={false}/><XAxis dataKey="hour" tick={{ fill: "var(--text-muted)", fontSize: 11 }} axisLine={false} tickLine={false}/><YAxis width={32} domain={[0, (maximum: number) => Math.min(500, Math.max(100, Math.ceil(maximum / 50) * 50))]} tick={{ fill: "var(--text-muted)", fontSize: 11 }} axisLine={false} tickLine={false}/><Tooltip contentStyle={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, color: "var(--text)" }} cursor={{stroke:"var(--border-strong)"}}/><Area type="monotone" dataKey="aqi" stroke="var(--blue-readable)" strokeWidth={2.5} fill="url(#aqiFill)" connectNulls/></AreaChart></ResponsiveContainer> : <div className="chart-empty">{loading ? "Loading model forecast…" : error ? "Forecast unavailable because data could not be loaded." : "Hourly model forecast unavailable."}</div>}</div>
-          <div className="chart-legend"><span><i/> US AQI forecast</span><span className="muted">Model estimate · not a sensor reading</span></div>
+          <div className="chart-legend"><span><i/> US AQI forecast</span><span className="muted">Modelled forecast · not a station observation</span></div>
         </div>
       </section>
       <GoWindowPanel

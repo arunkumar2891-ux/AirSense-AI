@@ -324,12 +324,14 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .source-badge.gps { color: var(--blue-deep); background: var(--blue-soft); border-color: var(--blue); }
 .source-badge.manual { color: var(--blue-deep); background: var(--blue-soft); }
 .data-status { color: var(--text-secondary); background: var(--surface-subtle); border: 1px solid var(--border); }
-.data-status.fresh { color: var(--blue-deep); background: var(--blue-soft); border-color: var(--blue); }
+.data-status.fresh,
+.data-status.estimate { color: var(--blue-deep); background: var(--blue-soft); border-color: var(--blue); }
 .data-status.aging { color: var(--orange-deep); background: var(--orange-soft); border-color: var(--orange); }
 .data-status.stale,
 .data-status.error,
 .data-status.unavailable { color: var(--danger); background: var(--danger-soft); border-color: var(--danger); }
 .muted { color: var(--text-muted); font-size: 10px; }
+.location-timing { text-align: right; line-height: 1.45; }
 
 .search-row { position: relative; }
 .nav-search { width: min(30vw, 360px); min-width: 210px; }
@@ -412,6 +414,19 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .context-strip > div:last-child { border-right: 0; }
 .context-strip span { display: block; color: var(--text-muted); font-size: 9px; font-weight: 650; text-transform: uppercase; letter-spacing: 0.7px; }
 .context-strip strong { display: block; margin-top: 4px; color: var(--text); font-size: 16px; font-weight: 700; }
+.weather-note {
+  grid-column: 1 / -1;
+  margin: 0;
+  padding: 10px 16px;
+  border-top: 1px solid var(--border);
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.weather-note.aging { color: var(--orange-deep); }
+.weather-note.excluded { color: var(--danger); }
+.decision-reasoning { overflow-wrap: anywhere; }
 
 .hero-grid { display: grid; grid-template-columns: 1.08fr 1fr; gap: 16px; }
 .aqi-card,
@@ -455,7 +470,8 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .aqi-card.purple .aqi-ring,
 .aqi-card.maroon .aqi-ring { color: var(--danger); background: var(--danger-soft); border-color: var(--danger); }
 .aqi-card h2 { margin: 14px 0 5px; color: var(--text); font-size: 20px; letter-spacing: -0.3px; }
-.aqi-card p { max-width: 460px; margin: 0; color: var(--text-secondary); font-size: 11px; line-height: 1.55; }
+.aqi-card p { max-width: 460px; margin: 0; color: var(--text-secondary); font-size: 11px; line-height: 1.55; overflow-wrap: anywhere; }
+.aqi-classification { margin-bottom: 6px; }
 .scale { margin-top: 24px; }
 .scale-bar {
   position: relative;
@@ -479,7 +495,18 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .scale-labels b,
 .scale-labels small { display: block; font-size: 9px; font-weight: 650; }
 .scale-labels small { margin-top: 2px; font-size: 8px; font-weight: 450; }
-.source-note { position: absolute; right: 20px; bottom: 12px; color: var(--text-muted); font-size: 8px; }
+.source-disclosure {
+  margin-top: 16px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  color: var(--text-muted);
+  font-size: 10px;
+  line-height: 1.45;
+}
+.source-disclosure small { color: var(--text-muted); font-size: 9px; }
 
 .card-heading h3,
 .section-header h2 { margin: 4px 0 0; color: var(--text); font-size: 18px; letter-spacing: -0.35px; }
@@ -595,6 +622,12 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .recommendation-label { color: var(--text); }
 .recommendation-label { font-weight: 730; }
 .gowindow-limitations { color: var(--text-muted); font-size: 10px; line-height: 1.5; }
+.gowindow-retrieval { display: grid; gap: 4px; margin-top: 12px; }
+.gowindow-retrieval ul { display: grid; gap: 2px; margin: 0; padding: 0; list-style: none; }
+.gowindow-retrieval li { color: var(--text-secondary); font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
+.gowindow-retrieval li.gowindow-retrieval-aging { color: var(--orange-deep); }
+.gowindow-retrieval li.gowindow-retrieval-stale,
+.gowindow-retrieval li.gowindow-retrieval-unknown { color: var(--danger); }
 .gowindow-state {
   display: grid;
   gap: 6px;
@@ -945,16 +978,18 @@ select:focus-visible {
   .geo-banner { grid-template-columns: auto 1fr auto; align-items: start; }
   .geo-banner .geo-allow { grid-column: 1 / 3; }
   .location-row { align-items: flex-start; flex-direction: column; margin-top: 22px; }
+  .location-timing { text-align: left; }
   .context-strip { grid-template-columns: repeat(2, 1fr); }
   .context-strip > div:nth-child(2) { border-right: 0; }
   .context-strip > div:nth-child(-n+2) { border-bottom: 1px solid var(--border); }
+  .context-strip > .weather-note { border-bottom: 0; }
   .aqi-card,
   .insight-card { min-height: 300px; padding: 18px; }
   .aqi-number { font-size: 72px; }
   .scale-labels { grid-template-columns: repeat(3, 1fr); row-gap: 8px; }
   .scale-labels b { font-size: 9px; }
   .scale-labels small { font-size: 8px; }
-  .source-note { position: static; margin-top: 12px; text-align: right; }
+  .source-disclosure { margin-top: 14px; }
   .section-header { align-items: flex-start; }
   .section-header > .muted { display: none; }
   .profile-controls,

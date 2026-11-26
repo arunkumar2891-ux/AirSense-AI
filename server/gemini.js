@@ -1,9 +1,9 @@
 import { GoogleGenAI } from "@google/genai";
+import { buildExplanationClaims } from "./logic.js";
 
 // ---------- Configuration ----------
 const configuredTimeoutMs = Number(process.env.AI_TIMEOUT_MS);
 export const AI_CONFIG = {
-  provider: (process.env.AI_PROVIDER || "gemini").toLowerCase(),
   apiKey: process.env.AI_API_KEY || "",
   sleep: null, // test hook: set to a no-op to skip real backoff delays
   model: process.env.AI_MODEL || "gemini-3.8-flash",
@@ -31,108 +31,176 @@ function getClient() {
 }
 
 // ---------- Structured output schema ----------
+const RECOMMENDATIONS = new Set(["suitable", "caution", "avoid", "insufficient_data"]);
+const MAX_CLAIM_IDS = 12;
+const MAX_CLAIM_ID_LENGTH = 64;
+const CLAIM_ID_PATTERN = /^[a-z][a-z0-9_]{0,63}$/;
+const RESPONSE_FIELDS = new Set(["recommendation", "claimIds"]);
+
 const RESPONSE_SCHEMA = {
   type: "OBJECT",
   properties: {
-    summary: { type: "STRING", description: "One-sentence plain-language summary of current air quality." },
-    airQualityAssessment: { type: "STRING", description: "Assessment of the observed AQI and pollutant readings." },
     recommendation: {
       type: "STRING",
       enum: ["suitable", "caution", "avoid", "insufficient_data"],
-      description: "Must exactly match the authoritative deterministic exposure recommendation.",
+      description: "Must exactly match the authoritative deterministic activityRecommendation.",
     },
-    reasoning: { type: "STRING", description: "Brief reasoning grounded only in the supplied facts." },
-    confidence: { type: "STRING", description: "high | medium | low, with a one-clause rationale." },
-    dataLimitations: { type: "STRING", description: "Caveats: modelled data, spatial resolution, not a station reading." },
+    claimIds: {
+      type: "ARRAY",
+      items: { type: "STRING" },
+      description: "IDs copied from allowedClaims. Do not invent IDs or write explanation text.",
+    },
   },
-  required: ["summary", "airQualityAssessment", "recommendation", "reasoning", "confidence", "dataLimitations"],
-  propertyOrdering: ["summary", "airQualityAssessment", "recommendation", "reasoning", "confidence", "dataLimitations"],
+  required: ["recommendation", "claimIds"],
+  propertyOrdering: ["recommendation", "claimIds"],
 };
 
+function finiteTimestamp(value) {
+  if (typeof value !== "string" || !value.trim()) return null;
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) ? new Date(ms).toISOString() : null;
+}
+
+function validReading(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? number : null;
+}
+
+function windForPrompt(decision) {
+  const wind = decision?.wind;
+  if (!wind || typeof wind !== "object") return null;
+  const excluded = wind.state === "excluded_stale"
+    || wind.state === "excluded_retrieval_time"
+    || wind.state === "excluded_missing_wind";
+  const assessment = {
+    state: wind.state ?? null,
+    eligibleForScoring: wind.state === "included" || wind.state === "included_aging",
+    points: wind.points ?? 0,
+    disclosure: wind.disclosure ?? null,
+    freshness: wind.freshness ? {
+      basis: wind.freshness.basis ?? "weatherRetrievedAt",
+      state: wind.freshness.state ?? null,
+      retrievalTimestamp: wind.freshness.timestamp ?? null,
+      ageMs: wind.freshness.ageMs ?? null,
+    } : null,
+  };
+  if (!excluded && Number.isFinite(wind.windSpeedKmh)) assessment.windSpeedKmh = wind.windSpeedKmh;
+  return assessment;
+}
+
 // ---------- Safety system prompt ----------
-function buildSystemPrompt(context, decision) {
-  const { aqi, category, activity, sensitivity, ageGroup, answer } = context;
+function buildSystemPrompt(context, decision, claims) {
   const lines = [
     "You are AirSense AI, a cautious urban air-quality assistant.",
-    "You MUST ground every statement in the supplied facts only.",
-    "Rules you must never break:",
-    "- Never fabricate readings or invent forecasts.",
-    "- Never confuse US AQI with European AQI; the value supplied is US AQI.",
-    "- Never make medical diagnoses or claims of medical certainty.",
-    "- Never claim a location or route is safer without supporting measurements.",
-    "- Clearly distinguish observed data from modelled forecast.",
-    "Deterministic baseline advice (follow it, do not contradict it):",
-    answer,
+    "Air-quality values supplied here are modelled estimates, not station observations.",
+    "You select explanation IDs. You do not write environmental facts.",
+    "Return JSON with recommendation and claimIds only.",
+    "recommendation must equal activityRecommendation exactly.",
+    "Every claimIds entry must be copied from allowedClaims. Do not invent IDs.",
+    "Do not write a summary, air-quality assessment, reasoning paragraph, measurement, or forecast.",
+    "Do not treat excluded wind as a current measurement.",
+    "Do not describe stale, missing, or unknown weather as current.",
+    "Do not override the deterministic exposure decision.",
+    "An insufficient_data decision is not a favorable activity recommendation.",
+    "Do not make medical diagnoses or claims of medical certainty.",
+    "Never confuse US AQI with European AQI.",
   ];
   if (decision) {
-    lines.push(
-      "",
-      "Deterministic exposure decision (authoritative — explain it, do not contradict it):",
-      `  overallRisk: ${decision.overallRisk}`,
-      `  activityRecommendation: ${decision.activityRecommendation}`,
-      `  recommendedAction: ${decision.recommendedAction}`,
-      `  reasoning: ${decision.reasoning}`,
-      "Set recommendation to activityRecommendation exactly. You may explain supplied facts, but must not offer separate or weaker advice.",
-    );
+    lines.push(`activityRecommendation: ${decision.activityRecommendation}`);
+    lines.push(`Allowed claim IDs: ${claims.map((claim) => claim.id).join(", ") || "(none)"}`);
   }
-  lines.push(
-    `Supplied facts: US AQI=${aqi} (${category}), activity=${activity}, ageGroup=${ageGroup}, sensitivity=${sensitivity}.`,
-    "Return only JSON matching the required schema. Keep each field concise (1–2 sentences).",
-  );
+  lines.push(`Activity profile: activity=${context.activity}, ageGroup=${context.ageGroup}, sensitivity=${context.sensitivity}.`);
   return lines.join("\n");
 }
 
-function buildUserPrompt(question, context, trusted) {
+function buildUserPrompt(question, context, trusted, decision, claims) {
+  const meta = trusted.metadata || {};
+  const modelInitializationTime = finiteTimestamp(
+    trusted.modelInitializedAt ?? meta.timestamps?.modelInitializedAt ?? null,
+  );
+  const aqi = validReading(trusted.aqi);
   return JSON.stringify({
     question,
-    observed: {
-      aqi: trusted.aqi,
-      aqiScale: trusted.aqiScale,
-      category: context.category,
-      pollutants: {
-        pm25: trusted.pollutants.pm25,
-        pm10: trusted.pollutants.pm10,
-        ozone: trusted.pollutants.ozone,
-        nitrogenDioxide: trusted.pollutants.nitrogenDioxide,
-        carbonMonoxide: trusted.pollutants.carbonMonoxide,
-        sulphurDioxide: trusted.pollutants.sulphurDioxide,
-      },
-      weather: trusted.weather,
-      observedAt: trusted.observedAt,
-      source: trusted.source,
+    classification: meta.dataClass || "modelled_estimate",
+    airQuality: {
+      scale: trusted.aqiScale || "US AQI",
+      value: aqi,
+      category: aqi === null ? null : context.category,
+      retrievalTimestamp: finiteTimestamp(trusted.retrievedAt ?? meta.timestamps?.retrievedAt ?? null),
+      forecastValidTime: finiteTimestamp(trusted.forecastValidAt ?? null),
+      modelInitializationTime,
     },
+    pollutants: {
+      pm25: validReading(trusted.pollutants?.pm25),
+    },
+    weather: {
+      retrievalTimestamp: finiteTimestamp(trusted.weatherRetrievedAt ?? null),
+      freshness: decision?.wind?.freshness?.state ?? null,
+      wind: windForPrompt(decision),
+    },
+    ...(meta.spatialResolution?.verified ? {
+      modelName: meta.model?.name ?? null,
+      nominalResolution: meta.spatialResolution.label ?? null,
+    } : {}),
+    source: trusted.source ?? null,
+    allowedClaims: claims.map((claim) => ({ id: claim.id, text: claim.text })),
     profile: { activity: context.activity, ageGroup: context.ageGroup, sensitivity: context.sensitivity },
   });
 }
 
 // ---------- Response parsing & validation ----------
-function parseStructuredResponse(text) {
-  if (!text || typeof text !== "string") throw new Error("Empty model response");
+function claimError(message) {
+  const error = new Error(message);
+  error.name = "ClaimValidation";
+  return error;
+}
+
+function mismatchError() {
+  const error = new Error("Recommendation mismatch");
+  error.name = "RecommendationMismatch";
+  return error;
+}
+
+function parseStructuredResponse(text, decision, claims) {
+  if (!text || typeof text !== "string") throw claimError("Empty model response");
   let parsed;
   try {
     parsed = JSON.parse(text);
   } catch {
-    throw new Error("Model returned non-JSON output");
+    throw claimError("Model returned non-JSON output");
   }
-  const required = ["summary", "airQualityAssessment", "recommendation", "reasoning", "confidence", "dataLimitations"];
-  for (const key of required) {
-    if (typeof parsed[key] !== "string" || !parsed[key].trim()) {
-      throw new Error(`Model response missing or invalid field: ${key}`);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw claimError("Model response is not an object");
+  }
+  if (Object.keys(parsed).some((key) => !RESPONSE_FIELDS.has(key))) {
+    throw claimError("Model response contains unpublished text");
+  }
+  if (!RECOMMENDATIONS.has(parsed.recommendation)) {
+    throw claimError("Model response has invalid recommendation");
+  }
+  if (!decision || parsed.recommendation !== decision.activityRecommendation) {
+    throw mismatchError();
+  }
+  if (!Array.isArray(parsed.claimIds) || parsed.claimIds.length < 1 || parsed.claimIds.length > MAX_CLAIM_IDS) {
+    throw claimError("Model response has an invalid number of claim IDs");
+  }
+  const seen = new Set();
+  const allowed = new Set(claims.map((claim) => claim.id));
+  for (const id of parsed.claimIds) {
+    if (typeof id !== "string" || id.length > MAX_CLAIM_ID_LENGTH || !CLAIM_ID_PATTERN.test(id)) {
+      throw claimError("Model response has an invalid claim ID");
     }
+    if (seen.has(id)) throw claimError("Model response repeats a claim ID");
+    seen.add(id);
+    if (!allowed.has(id)) throw claimError("Model response cites an unknown claim ID");
   }
-  const recommendations = new Set(["suitable", "caution", "avoid", "insufficient_data"]);
-  if (!recommendations.has(parsed.recommendation)) {
-    throw new Error("Model response has invalid recommendation");
-  }
-  return parsed;
+  return { recommendation: parsed.recommendation, claimIds: [...parsed.claimIds] };
 }
 
-function formatStructuredAnswer(parsed, deterministicAnswer) {
-  return [
-    deterministicAnswer,
-    `AI explanation: ${parsed.summary} ${parsed.airQualityAssessment} ${parsed.reasoning}`,
-    `Confidence: ${parsed.confidence}. ${parsed.dataLimitations}`,
-  ].filter(Boolean).join("\n\n");
+function assembleClaimAnswer(claimIds, claims) {
+  const textById = new Map(claims.map((claim) => [claim.id, claim.text]));
+  return claimIds.map((id) => textById.get(id)).join(" ");
 }
 
 // ---------- Retry with exponential backoff + jitter ----------
@@ -208,8 +276,9 @@ export async function askGemini(question, context, trusted, decision = null) {
     return { answer: context.answer, mode: "rules", structured: null, decision };
   }
 
-  const system = buildSystemPrompt(context, decision);
-  const userPrompt = buildUserPrompt(question, context, trusted);
+  const claims = buildExplanationClaims(trusted, decision);
+  const system = buildSystemPrompt(context, decision, claims);
+  const userPrompt = buildUserPrompt(question, context, trusted, decision, claims);
   const ai = getClient();
   const deadlineAt = Date.now() + AI_CONFIG.timeoutMs;
 
@@ -240,21 +309,31 @@ export async function askGemini(question, context, trusted, decision = null) {
       );
       const latencyMs = Date.now() - start;
       const text = response?.text;
-      const structured = parseStructuredResponse(text);
-      // The enum is the safety contract. Any mismatch discards the entire AI
-      // response; free-form model text is never used to weaken the rules.
-      if (decision && structured.recommendation !== decision.activityRecommendation) {
-        logAI({ model: AI_CONFIG.model, latencyMs, success: false, mode: "rules-safety-fallback", attempt, errorType: "RecommendationMismatch" });
+      let structured;
+      try {
+        structured = parseStructuredResponse(text, decision, claims);
+      } catch (err) {
+        const mismatch = err?.name === "RecommendationMismatch";
+        logAI({
+          model: AI_CONFIG.model,
+          latencyMs,
+          success: false,
+          mode: mismatch ? "rules-safety-fallback" : "rules-fallback",
+          attempt,
+          errorType: err?.name || "ClaimValidation",
+        });
         return {
           answer: context.answer,
           mode: "rules-fallback",
           structured: null,
           decision,
-          note: "AI explanation discarded because it did not match the deterministic exposure recommendation.",
+          note: mismatch
+            ? "AI explanation discarded because it did not match the deterministic exposure recommendation."
+            : "AI explanation discarded because the returned claims could not be validated.",
         };
       }
       logAI({ model: AI_CONFIG.model, latencyMs, success: true, mode: "ai", attempt });
-      return { answer: formatStructuredAnswer(structured, context.answer), mode: "ai", structured, decision };
+      return { answer: assembleClaimAnswer(structured.claimIds, claims), mode: "ai", structured, decision };
     } catch (err) {
       const latencyMs = Date.now() - start;
       const errorType = err?.name || "Error";

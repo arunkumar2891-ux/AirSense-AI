@@ -1,3 +1,4 @@
+import { formatTimingDisclosure, getRetrievalAge } from "./reliability";
 import type { GoWindowRequest, GoWindowResponse, GoWindowResult, GoWindowTimePreference, Profile } from "./types";
 
 export const GO_WINDOW_DURATIONS = [15, 30, 45, 60, 90, 120] as const;
@@ -116,7 +117,52 @@ function preferencePhrase(result: GoWindowResponse) {
   return `${result.preference.label} (${result.preference.rangeLabel})`;
 }
 
-function viewWindow(window: GoWindowResult, result: GoWindowResponse, index: number, alternative: boolean): GoWindowCard {
+function formatScheduleFreshness(window: GoWindowResult, result: GoWindowResponse, now: number) {
+  const ts = result.metadata?.timestamps;
+  const airSummary = ts
+    ? formatTimingDisclosure({
+      forecastValidAt: ts.forecastValidAt,
+      modelInitializedAt: ts.modelInitializedAt,
+      retrievedAt: ts.retrievedAt,
+      timezone: window.timezone || result.timezone,
+      now,
+    }).summary
+    : null;
+  const weather = result.sourceFreshness?.weather;
+  const weatherAge = weather ? getRetrievalAge(weather.timestamp, now) : null;
+  const weatherSummary = weatherAge
+    ? `Weather ${weatherAge.valid ? weatherAge.label.toLowerCase() : "retrieval time unavailable"}`
+    : null;
+  if (airSummary || weatherSummary) return `${[airSummary, weatherSummary].filter(Boolean).join(" · ")}.`;
+  return window.dataFreshness?.label || result.forecastFreshness?.label || "Model run age unavailable";
+}
+
+export type RetrievalLine = { source: "air" | "weather"; tone: "fresh" | "aging" | "stale" | "unknown"; text: string };
+
+function retrievalLines(result: GoWindowResponse, now: number): RetrievalLine[] {
+  const sources = result.sourceFreshness;
+  if (!sources?.air || !sources?.weather) return [];
+  return (["air", "weather"] as const).map((source) => {
+    const item = sources[source];
+    const age = getRetrievalAge(item.timestamp, now);
+    const tone = item.state === "fresh" || item.state === "aging" || item.state === "stale" ? item.state : "unknown";
+    const stateText = tone === "fresh" ? "recent" : tone === "aging" ? "aging" : tone === "stale" ? "old" : "unavailable";
+    const timing = age.valid ? age.label : "Retrieval time unavailable";
+    const name = source === "air" ? "Air quality" : "Weather";
+    return { source, tone, text: `${name}: ${timing} · ${stateText}` };
+  });
+}
+
+function formatScheduleSourceDisclosure(result: GoWindowResponse) {
+  const meta = result.metadata;
+  if (!meta) return "";
+  if (meta.spatialResolution?.verified && meta.model?.name && meta.spatialResolution?.label) {
+    return `Modelled air-quality estimate · ${meta.model.name} · ${meta.spatialResolution.label}.`;
+  }
+  return "Modelled air-quality estimate · Open-Meteo / CAMS · Not a local station observation.";
+}
+
+function viewWindow(window: GoWindowResult, result: GoWindowResponse, index: number, alternative: boolean, now: number): GoWindowCard {
   return {
     rank: index + 1,
     best: !alternative && index === 0,
@@ -129,7 +175,7 @@ function viewWindow(window: GoWindowResult, result: GoWindowResponse, index: num
     weather: formatForecastWeather(window),
     rankReason: window.rankReason,
     recommendationLabel: recommendationSentence(window.recommendationLabel),
-    freshness: window.dataFreshness?.label || result.forecastFreshness?.label || "Forecast age unavailable",
+    freshness: formatScheduleFreshness(window, result, now),
     limitations: window.limitations || result.limitations,
   };
 }
@@ -138,6 +184,9 @@ export type GoWindowDisplay =
   | {
       state: "suitable_windows";
       preferenceLabel: string;
+      sourceDisclosure: string;
+      retrievalLines: RetrievalLine[];
+      policyNote: string;
       windows: GoWindowCard[];
       limitations: string;
     }
@@ -148,16 +197,22 @@ export type GoWindowDisplay =
       detail: string;
       guidance: string;
       preferenceLabel: string;
+      sourceDisclosure: string;
+      retrievalLines: RetrievalLine[];
+      policyNote: string;
       alternatives: GoWindowCard[];
       limitations: string;
     }
-  | { state: "no_suitable_window"; title: string; message: string; detail: string; guidance: string; limitations: string }
-  | { state: "insufficient_data"; title: string; message: string; detail: string; guidance: string; limitations: string }
+  | { state: "no_suitable_window"; title: string; message: string; detail: string; guidance: string; sourceDisclosure: string; retrievalLines: RetrievalLine[]; policyNote: string; limitations: string }
+  | { state: "insufficient_data"; title: string; message: string; detail: string; guidance: string; sourceDisclosure: string; retrievalLines: RetrievalLine[]; policyNote: string; limitations: string }
   | { state: "invalid"; message: string };
 
-export function presentGoWindow(result: GoWindowResponse | null): GoWindowDisplay | null {
+export function presentGoWindow(result: GoWindowResponse | null, now = Date.now()): GoWindowDisplay | null {
   if (!result) return null;
   const preferenceLabel = preferencePhrase(result);
+  const sourceDisclosure = formatScheduleSourceDisclosure(result);
+  const lines = retrievalLines(result, now);
+  const policyNote = result.freshnessPolicy?.note || "";
   const alternatives = Array.isArray(result.windows)
     ? result.windows.filter((window) => window.placement === "alternative").slice(0, 3)
     : [];
@@ -176,7 +231,10 @@ export function presentGoWindow(result: GoWindowResponse | null): GoWindowDispla
       detail: result.reason,
       guidance: "These alternatives are outside the selected preference and are not the primary recommendation. The current air-quality reading and exposure guidance remain available above.",
       preferenceLabel,
-      alternatives: alternatives.map((window, index) => viewWindow(window, result, index, true)),
+      sourceDisclosure,
+      retrievalLines: lines,
+      policyNote,
+      alternatives: alternatives.map((window, index) => viewWindow(window, result, index, true, now)),
       limitations: result.limitations,
     };
   }
@@ -184,8 +242,11 @@ export function presentGoWindow(result: GoWindowResponse | null): GoWindowDispla
     return {
       state: "suitable_windows",
       preferenceLabel,
+      sourceDisclosure,
+      retrievalLines: lines,
+      policyNote,
       limitations: result.limitations,
-      windows: preferred.map((window, index) => viewWindow(window, result, index, false)),
+      windows: preferred.map((window, index) => viewWindow(window, result, index, false, now)),
     };
   }
   if (result.status === "no_suitable_window") {
@@ -195,6 +256,9 @@ export function presentGoWindow(result: GoWindowResponse | null): GoWindowDispla
       message: NO_SUITABLE_COPY,
       detail: result.reason,
       guidance: "The current air-quality reading and exposure guidance remain available above. This forecast does not change that guidance.",
+      sourceDisclosure,
+      retrievalLines: lines,
+      policyNote,
       limitations: result.limitations,
     };
   }
@@ -205,6 +269,9 @@ export function presentGoWindow(result: GoWindowResponse | null): GoWindowDispla
       message: INSUFFICIENT_COPY,
       detail: result.reason,
       guidance: "No alternative times are suggested when forecast data is insufficient.",
+      sourceDisclosure,
+      retrievalLines: lines,
+      policyNote,
       limitations: result.limitations,
     };
   }

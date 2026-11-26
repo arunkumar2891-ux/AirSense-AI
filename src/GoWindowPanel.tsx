@@ -84,6 +84,12 @@ export default function GoWindowPanel({
       </div>
       <ActivityTimeline hourly={hourly} timezone={timezone} timePreference={timePreference} result={loading ? null : result} />
       <div className="gowindow-results" aria-live="polite">
+        {!loading && !error && display && display.state !== "invalid" && display.retrievalLines.length > 0 && <div className="gowindow-retrieval">
+          <ul aria-label="Retrieval times">
+            {display.retrievalLines.map((line) => <li key={line.source} className={`gowindow-retrieval-${line.tone}`}>{line.text}</li>)}
+          </ul>
+          {display.policyNote && <p className="gowindow-limitations">{display.policyNote}</p>}
+        </div>}
         {loading && <p className="gowindow-status" role="status">Checking the forecast for a suitable time.</p>}
         {error && <div className="gowindow-state error" role="alert"><b>Activity window unavailable</b><span>{error}</span></div>}
         {!loading && !error && display?.state === "suitable_windows" && <>
@@ -106,6 +112,7 @@ export default function GoWindowPanel({
               <p className="gowindow-limitations">{window.limitations}</p>
             </article>)}
           </div>
+          {display.sourceDisclosure && <p className="gowindow-limitations">{display.sourceDisclosure}</p>}
           <p className="gowindow-limitations">{display.limitations}</p>
         </>}
         {!loading && !error && display?.state === "outside_preference" && <div className="gowindow-alternatives">
@@ -134,6 +141,7 @@ export default function GoWindowPanel({
               <p className="gowindow-limitations">{window.limitations}</p>
             </article>)}
           </div>
+          {display.sourceDisclosure && <p className="gowindow-limitations">{display.sourceDisclosure}</p>}
           <p className="gowindow-limitations">{display.limitations}</p>
         </div>}
         {!loading && !error && display?.state === "no_suitable_window" && <div className="gowindow-state" role="status">
@@ -141,6 +149,7 @@ export default function GoWindowPanel({
           <span>{display.message}</span>
           <span>{display.detail}</span>
           <span>{display.guidance}</span>
+          {display.sourceDisclosure && <span className="gowindow-limitations">{display.sourceDisclosure}</span>}
           <span className="gowindow-limitations">{display.limitations}</span>
         </div>}
         {!loading && !error && display?.state === "insufficient_data" && <div className="gowindow-state" role="status">
@@ -148,6 +157,7 @@ export default function GoWindowPanel({
           <span>{display.message}</span>
           <span>{display.detail}</span>
           <span>{display.guidance}</span>
+          {display.sourceDisclosure && <span className="gowindow-limitations">{display.sourceDisclosure}</span>}
           <span className="gowindow-limitations">{display.limitations}</span>
         </div>}
         {!loading && !error && display?.state === "invalid" && <div className="gowindow-state error" role="alert"><b>Activity window unavailable</b><span>{display.message}</span></div>}

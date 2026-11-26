@@ -19,6 +19,10 @@ function forecastFixture(mode = providerMode) {
   const pm25 = times.map(() => missing ? null : unsuitable ? 80 : 8);
   return {
     air: {
+      latitude: 13.099998,
+      longitude: 80.30002,
+      elevation: 10.0,
+      generationtime_ms: 0.65,
       timezone: "Asia/Kolkata",
       utc_offset_seconds: 19800,
       current: { time: nowSeconds, us_aqi: aqi[0], pm2_5: pm25[0], pm10: 12 },
@@ -108,6 +112,14 @@ test("valid GoWindow request returns suitable windows from trusted forecast data
   assert.equal(response.body.durationMinutes, 15);
   assert.equal(response.body.timezone, "Asia/Kolkata");
   assert.equal(response.body.forecastFreshness.state, "fresh");
+  assert.doesNotMatch(response.body.forecastFreshness.label, /^Observed|FRESH MODEL DATA/i);
+  assert.match(response.body.forecastFreshness.label, /model run age unavailable/i);
+  assert.equal(response.body.metadata.providerCell.latitude, 13.099998);
+  assert.equal(response.body.metadata.providerCell.longitude, 80.30002);
+  assert.equal(response.body.metadata.timestamps.modelInitializedAt, null);
+  assert.ok(response.body.metadata.timestamps.retrievedAt);
+  assert.equal(response.body.metadata.spatialResolution.verified, true);
+  assert.equal(response.body.metadata.spatialResolution.approximateKm, 45);
   assert.equal(response.body.timePreference, null);
   assert.ok(response.body.windows.length > 0);
   assert.equal(response.body.windows[0].exposureRecommendation, "suitable");
@@ -119,6 +131,43 @@ test("valid GoWindow request returns suitable windows from trusted forecast data
   assert.match(response.body.limitations, /model estimates/i);
   assert.ok(upstreamCalls.some((url) => url.includes("air-quality-api.open-meteo.com")));
   assert.ok(upstreamCalls.some((url) => url.includes("hourly=temperature_2m")));
+});
+
+test("a cache hit preserves each source's own retrievedAt", async () => {
+  const first = await request(app, { method: "POST", url: "/api/gowindow", body: goWindowBody({ durationMinutes: 15 }) });
+  assert.equal(first.status, 200);
+  assert.equal(first.body.sourceFreshness.air.basis, "retrievedAt");
+  assert.equal(first.body.sourceFreshness.weather.basis, "retrievedAt");
+  assert.equal(first.body.metadata.timestamps.retrievedAt, first.body.sourceFreshness.air.timestamp);
+  assert.doesNotMatch(first.body.sourceFreshness.weather.label, /model run/i);
+
+  const keys = [...cache.entries.keys()];
+  const airKey = keys.find((key) => key.includes("air-quality-api"));
+  const weatherKey = keys.find((key) => key.includes("/v1/forecast"));
+  const airRetrievedAt = new Date(Date.now() - 2 * 60 * 1000).toISOString();
+  const weatherRetrievedAt = new Date(Date.now() - 11 * 60 * 1000).toISOString();
+  cache.entries.get(airKey).value.retrievedAt = airRetrievedAt;
+  cache.entries.get(weatherKey).value.retrievedAt = weatherRetrievedAt;
+  upstreamCalls = [];
+  const cached = await request(app, { method: "POST", url: "/api/gowindow", body: goWindowBody({ durationMinutes: 15 }) });
+  assert.deepEqual(upstreamCalls, []);
+  assert.equal(cached.body.status, "suitable_windows");
+  assert.equal(cached.body.sourceFreshness.air.timestamp, airRetrievedAt);
+  assert.equal(cached.body.sourceFreshness.weather.timestamp, weatherRetrievedAt);
+  assert.notEqual(cached.body.sourceFreshness.air.timestamp, cached.body.sourceFreshness.weather.timestamp);
+  assert.deepEqual(
+    cached.body.windows.map((window) => [window.aqi, window.pm25, window.weather, window.rankReason]),
+    first.body.windows.map((window) => [window.aqi, window.pm25, window.weather, window.rankReason]),
+  );
+
+  cache.entries.delete(weatherKey);
+  upstreamCalls = [];
+  const refreshedWeather = await request(app, { method: "POST", url: "/api/gowindow", body: goWindowBody({ durationMinutes: 15 }) });
+  assert.equal(upstreamCalls.length, 1);
+  assert.match(upstreamCalls[0], /\/v1\/forecast/);
+  assert.equal(refreshedWeather.body.sourceFreshness.air.timestamp, airRetrievedAt);
+  assert.notEqual(refreshedWeather.body.sourceFreshness.weather.timestamp, airRetrievedAt);
+  assert.notEqual(refreshedWeather.body.sourceFreshness.weather.timestamp, weatherRetrievedAt);
 });
 
 test("no suitable forecast window remains distinct from insufficient data", async () => {
