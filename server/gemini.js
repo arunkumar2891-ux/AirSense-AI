@@ -1,5 +1,6 @@
 import { GoogleGenAI } from "@google/genai";
 import { buildExplanationClaims, getAQIStatus, getPM25Status } from "./logic.js";
+import { extractLocationIntent, placeNamesMatch } from "./locations.js";
 
 // ---------- Configuration ----------
 const configuredTimeoutMs = Number(process.env.AI_TIMEOUT_MS);
@@ -268,7 +269,7 @@ function isContentTask(clause) {
   return false;
 }
 
-function isUnrelatedClause(clause) {
+export function isUnrelatedClause(clause) {
   return isContentTask(clause) || UNRELATED_TASK.some((pattern) => pattern.test(clause));
 }
 
@@ -277,14 +278,15 @@ function isTopicContinuation(left, right) {
   return !/^(?:please\s+)?(?:write|compose|draft|create|make|design|draw|sketch|explain|describe|tell|what|why|how|is|can|should|summarize|summarise|translate|give|solve|calculate|who)\b/i.test(right.trim());
 }
 
-function splitClauses(text) {
+export function splitClauses(text) {
   const parts = [];
-  const boundary = /\s+(?:and then|and also|also)\s+|\s*,?\s*then\s+|\s*,\s*and\s+|\s+and\s+|[?;.]\s+/gi;
+  const boundary = /\s+(?:and then|and also|also)\s+|\s*,?\s*then\s+|\s*,\s*and\s+|\s+and\s+|\s+or\s+|[?;.]\s+/gi;
   let last = 0;
   for (const match of text.matchAll(boundary)) {
     const left = text.slice(last, match.index);
     const right = text.slice(match.index + match[0].length);
     if (/^\s+and\s+$/i.test(match[0]) && isTopicContinuation(left, right)) continue;
+    if (/^\s+or\s+$/i.test(match[0]) && !isUnrelatedClause(right)) continue;
     const clause = left.trim();
     if (clause) parts.push(clause);
     last = match.index + match[0].length;
@@ -417,7 +419,52 @@ function medicalRecommendation(text) {
   return patterns.some((pattern) => pattern.test(text));
 }
 
-export function validateExplanation(explanation, { air, decision, hypothetical } = {}) {
+// Cities checked as whole words. Common English words that are also place
+// names (Reading, Nice, Mobile) are omitted so ordinary sentences are not
+// rejected. A resolved place may still use those words because its own name
+// is allowed below.
+const KNOWN_PLACES = [
+  "new delhi", "bengaluru", "bangalore", "mumbai", "bombay", "chennai", "madras",
+  "kolkata", "calcutta", "hyderabad", "ahmedabad", "lucknow", "kochi", "jaipur",
+  "pune", "delhi", "london", "paris", "tokyo", "beijing", "shanghai", "singapore",
+  "dubai", "sydney", "melbourne", "toronto", "chicago", "boston", "seattle",
+  "springfield", "cairo", "lagos", "nairobi", "berlin", "madrid", "rome", "moscow",
+  "bangkok", "jakarta", "manila", "seoul", "osaka", "kyoto", "taipei", "hanoi",
+  "dhaka", "karachi", "lahore", "colombo", "kathmandu", "goa",
+].sort((left, right) => right.length - left.length);
+
+const COMMON_PLACE_WORDS = new Set([
+  "reading", "nice", "mobile", "bath", "derby", "split", "turkey", "china",
+  "georgia", "jordan", "chad", "guinea", "general", "today", "current", "goal",
+]);
+
+function mentionsWholePhrase(text, phrase) {
+  const escaped = phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(?<![\\p{L}\\p{N}])${escaped}(?![\\p{L}\\p{N}])`, "iu").test(text);
+}
+
+function foreignPlaceMention(text, place, question) {
+  const resolved = String(place || "").trim();
+  const resolvedName = resolved.split(",")[0].trim();
+  const allowed = (name) => {
+    if (!name || COMMON_PLACE_WORDS.has(name)) return false;
+    if (!resolved) return false;
+    return placeNamesMatch(name, resolved) || placeNamesMatch(name, resolvedName);
+  };
+  for (const phrase of KNOWN_PLACES) {
+    if (!mentionsWholePhrase(text, phrase) || allowed(phrase)) continue;
+    return phrase;
+  }
+  const asked = extractLocationIntent(question).names || [];
+  for (const name of asked) {
+    const normalized = String(name || "").normalize("NFKC").toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, " ").replace(/\s+/g, " ").trim();
+    if (!normalized || COMMON_PLACE_WORDS.has(normalized) || allowed(normalized)) continue;
+    if (mentionsWholePhrase(text, normalized)) return normalized;
+  }
+  return "";
+}
+
+export function validateExplanation(explanation, { air, decision, hypothetical, place, question } = {}) {
   if (typeof explanation !== "string") return "Explanation is missing.";
   const text = normalizeQuestion(explanation);
   if (text.length < MIN_EXPLANATION_LENGTH || text.length > MAX_EXPLANATION_LENGTH) return "Explanation length is outside the allowed range.";
@@ -462,6 +509,8 @@ export function validateExplanation(explanation, { air, decision, hypothetical }
   } else if (/\bwould be (suitable|caution|avoid|insufficient)\b/i.test(text)) {
     return "Explanation invents a hypothetical recommendation.";
   }
+  const foreignPlace = foreignPlaceMention(text, place, question);
+  if (foreignPlace) return "Explanation names a place other than the resolved location.";
   return null;
 }
 
@@ -500,7 +549,7 @@ function windForPrompt(decision) {
 }
 
 // ---------- Safety system prompt ----------
-function buildSystemPrompt(context, decision, claims) {
+function buildSystemPrompt(context, decision, claims, place) {
   const lines = [
     "You are AirSense AI, a cautious urban air-quality assistant.",
     "Answer only air quality, weather, pollution, environmental exposure, outdoor activity precautions, and AirSense readings or deterministic decisions.",
@@ -532,10 +581,14 @@ function buildSystemPrompt(context, decision, claims) {
     lines.push(`Allowed claim IDs: ${claims.map((claim) => claim.id).join(", ") || "(none)"}`);
   }
   lines.push(`Activity profile: activity=${context.activity}, ageGroup=${context.ageGroup}, sensitivity=${context.sensitivity}.`);
+  if (place) {
+    lines.push(`resolvedPlace: ${place}`);
+    lines.push("These readings describe resolvedPlace only. Do not name a different place.");
+  }
   return lines.join("\n");
 }
 
-function buildUserPrompt(question, context, trusted, decision, claims, hypothetical) {
+function buildUserPrompt(question, context, trusted, decision, claims, hypothetical, place) {
   const meta = trusted.metadata || {};
   const modelInitializationTime = finiteTimestamp(
     trusted.modelInitializedAt ?? meta.timestamps?.modelInitializedAt ?? null,
@@ -565,6 +618,7 @@ function buildUserPrompt(question, context, trusted, decision, claims, hypotheti
       nominalResolution: meta.spatialResolution.label ?? null,
     } : {}),
     source: trusted.source ?? null,
+    ...(place ? { resolvedPlace: place } : {}),
     allowedClaims: claims.map((claim) => ({ id: claim.id, text: claim.text })),
     profile: { activity: context.activity, ageGroup: context.ageGroup, sensitivity: context.sensitivity },
     ...(hypothetical ? { hypothetical } : {}),
@@ -584,7 +638,7 @@ function mismatchError() {
   return error;
 }
 
-function parseStructuredResponse(text, decision, claims, air, hypothetical) {
+function parseStructuredResponse(text, decision, claims, air, hypothetical, placeContext = {}) {
   if (!text || typeof text !== "string") throw claimError("Empty model response");
   let parsed;
   try {
@@ -617,7 +671,9 @@ function parseStructuredResponse(text, decision, claims, air, hypothetical) {
     seen.add(id);
     if (!allowed.has(id)) throw claimError("Model response cites an unknown claim ID");
   }
-  const explanationError = validateExplanation(parsed.explanation, { air, decision, hypothetical });
+  const explanationError = validateExplanation(parsed.explanation, {
+    air, decision, hypothetical, place: placeContext.place, question: placeContext.question,
+  });
   if (explanationError) throw claimError(explanationError);
   return { recommendation: parsed.recommendation, claimIds: [...parsed.claimIds], explanation: normalizeQuestion(parsed.explanation) };
 }
@@ -849,8 +905,9 @@ export async function askGemini(question, context, trusted, decision = null, opt
   const narrowed = explainQuestion !== normalized;
   const scopedAnswer = narrowed ? `${context.answer} ${MIXED_SCOPE_NOTE}` : context.answer;
   const claims = buildExplanationClaims(trusted, decision);
-  const system = buildSystemPrompt(context, decision, claims);
-  const userPrompt = buildUserPrompt(explainQuestion, context, trusted, decision, claims, hypothetical);
+  const place = typeof options.place === "string" && options.place.trim() ? options.place.trim() : "";
+  const system = buildSystemPrompt(context, decision, claims, place);
+  const userPrompt = buildUserPrompt(explainQuestion, context, trusted, decision, claims, hypothetical, place);
   const ai = getClient();
 
   let finalAttempt = 0;
@@ -882,7 +939,9 @@ export async function askGemini(question, context, trusted, decision = null, opt
       const text = response?.text;
       let structured;
       try {
-        structured = parseStructuredResponse(text, decision, claims, trusted, hypothetical);
+        structured = parseStructuredResponse(text, decision, claims, trusted, hypothetical, {
+          place, question: normalized,
+        });
       } catch (err) {
         const mismatch = err?.name === "RecommendationMismatch";
         logAI({

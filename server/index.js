@@ -5,7 +5,8 @@ import helmet from "helmet";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { getAQIStatus, buildRecommendationContext, buildExposureDecision, parseWindHypothetical, buildWindHypothetical } from "./logic.js";
-import { askGemini } from "./gemini.js";
+import { askGemini, classifyLocalDomain, detectPromptInjection, normalizeQuestion } from "./gemini.js";
+import { buildComparison, clarificationAnswer, describeLocationAnswer, extractLocationIntent, geocodeQueries, judgeGeocode, placeLabel } from "./locations.js";
 import { providerTimeToEpochMs, providerTimeToIso, selectCurrentAndFutureHours } from "./time.js";
 import { findGoWindows, TIME_PREFERENCES } from "./gowindow.js";
 import { buildForecastMetadata } from "./metadata.js";
@@ -481,6 +482,140 @@ function isTimeoutError(err) {
 // ---------- Routes ----------
 app.get("/api/health", (_req, res) => res.json({ ok: true, service: "airsense-ai", timestamp: new Date().toISOString() }));
 
+async function searchPlaces(name) {
+  const q = String(name || "").trim().replace(/[\x00-\x1f]/g, "");
+  if (q.length < 2 || q.length > 100) return [];
+  const url = `https://geocoding-api.open-meteo.com/v1/search?${new URLSearchParams({ name: q, count: "6", language: "en", format: "json" })}`;
+  const data = await cachedFetch(url, GEOCODE_CACHE_TTL_MS);
+  return (Array.isArray(data?.results) ? data.results : []).map((place) => ({
+    name: String(place.name || ""),
+    region: place.admin1 ? String(place.admin1) : "",
+    country: place.country ? String(place.country) : "",
+    latitude: Number(place.latitude),
+    longitude: Number(place.longitude),
+    population: Number.isFinite(Number(place.population)) ? Number(place.population) : null,
+  })).filter((place) => place.name && Number.isFinite(place.latitude) && Number.isFinite(place.longitude));
+}
+
+function publicLocation(location) {
+  const copy = { ...location };
+  delete copy.trusted;
+  return copy;
+}
+
+async function resolveNamedLocation(query, profile, now) {
+  const queries = geocodeQueries(query);
+  const settled = await Promise.all(queries.map(async (name) => {
+    try {
+      return { ok: true, results: await searchPlaces(name) };
+    } catch {
+      return { ok: false, results: [] };
+    }
+  }));
+  if (settled.every((item) => !item.ok)) {
+    return {
+      query, status: "geocoding_unavailable", source: "named", decision: null,
+      note: "Location search is temporarily unavailable for this place.",
+    };
+  }
+  const seen = new Set();
+  const results = [];
+  for (const place of settled.flatMap((item) => item.results)) {
+    const key = `${place.name.toLowerCase()}|${place.latitude}|${place.longitude}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    results.push(place);
+  }
+  const judged = judgeGeocode(query, results);
+  if (judged.status === "unresolved") {
+    return {
+      query, status: "unresolved", source: "named", decision: null,
+      candidates: judged.candidates,
+      note: `${query} could not be resolved to a place.`,
+    };
+  }
+  if (judged.status === "ambiguous") {
+    return {
+      query, status: "ambiguous", source: "named", candidates: judged.candidates, decision: null,
+      note: `${query} matches more than one place.`,
+    };
+  }
+  const coords = validateCoordinates(judged.place.latitude, judged.place.longitude);
+  if (!coords) {
+    return { query, status: "unresolved", source: "named", decision: null, note: `${query} did not return usable coordinates.` };
+  }
+  const normalized = normalizeCoordinates(coords.latitude, coords.longitude);
+  try {
+    const trusted = await fetchTrustedEnvironmentalData(normalized.latitude, normalized.longitude);
+    const decision = buildExposureDecision(trusted, profile, now);
+    const weather = trusted.weather && typeof trusted.weather === "object" ? trusted.weather : {};
+    return {
+      query,
+      status: "ready",
+      source: "named",
+      name: judged.place.name,
+      region: judged.place.region,
+      country: judged.place.country,
+      latitude: trusted.location.latitude,
+      longitude: trusted.location.longitude,
+      aqi: trusted.aqi,
+      aqiScale: trusted.aqiScale || "US AQI",
+      pm25: trusted.pollutants?.pm25 ?? null,
+      weatherAvailable: Boolean(trusted.weatherRetrievedAt) && Object.keys(weather).length > 0,
+      retrievedAt: trusted.retrievedAt ?? null,
+      weatherRetrievedAt: trusted.weatherRetrievedAt ?? null,
+      decision,
+      trusted,
+    };
+  } catch {
+    return {
+      query,
+      status: "environment_data_unavailable",
+      source: "named",
+      name: judged.place.name,
+      region: judged.place.region,
+      country: judged.place.country,
+      latitude: normalized.latitude,
+      longitude: normalized.longitude,
+      aqi: null,
+      pm25: null,
+      weatherAvailable: false,
+      retrievedAt: null,
+      weatherRetrievedAt: null,
+      decision: null,
+      note: "Air-quality data is temporarily unavailable for this place.",
+    };
+  }
+}
+
+function assistantPayload(result, decision, hypothetical, extra = {}) {
+  const answered = result.mode === "ai" || result.mode === "rules" || result.mode === "rules-fallback";
+  return {
+    answer: result.answer,
+    evidence: result.evidence || [],
+    mode: result.mode,
+    decision,
+    ...(answered && hypothetical ? { hypothetical } : {}),
+    ...(result.structured ? { structured: result.structured } : {}),
+    ...(result.note ? { note: result.note } : {}),
+    ...(answered ? { context: result.context } : {}),
+    ...extra,
+  };
+}
+
+async function answerForTrusted(question, profile, trusted, decision, place) {
+  const context = buildRecommendationContext(trusted, profile, question, decision);
+  if (place) context.answer = `${place}. ${context.answer}`;
+  const assumedWind = parseWindHypothetical(question);
+  const hypothetical = assumedWind === null ? null : buildWindHypothetical(trusted, profile, assumedWind, Date.now());
+  const result = await askGemini(question, context, trusted, decision, { hypothetical, ...(place ? { place } : {}) });
+  result.context = context;
+  if (place && result.answer && !result.answer.includes(place.split(",")[0])) {
+    result.answer = `${place}. ${result.answer}`;
+  }
+  return { result, hypothetical };
+}
+
 // City search (forward geocoding via Open-Meteo). Cached — place names change rarely.
 app.get("/api/geocode", rateLimiters.geocode.middleware, async (req, res) => {
   const q = typeof req.query.q === "string" ? req.query.q.trim().replace(/[\x00-\x1f]/g, "") : "";
@@ -488,15 +623,9 @@ app.get("/api/geocode", rateLimiters.geocode.middleware, async (req, res) => {
     return res.status(400).json({ error: "Enter a place name between 2 and 100 characters." });
   }
   try {
-    const url = `https://geocoding-api.open-meteo.com/v1/search?${new URLSearchParams({ name: q, count: "6", language: "en", format: "json" })}`;
-    const data = await cachedFetch(url, GEOCODE_CACHE_TTL_MS);
-    const results = (Array.isArray(data?.results) ? data.results : []).map((r) => ({
-      name: String(r.name || ""),
-      region: r.admin1 ? String(r.admin1) : "",
-      country: r.country ? String(r.country) : "",
-      latitude: Number(r.latitude),
-      longitude: Number(r.longitude),
-    })).filter((r) => r.name && Number.isFinite(r.latitude) && Number.isFinite(r.longitude));
+    const results = (await searchPlaces(q)).map(({ name, region, country, latitude, longitude }) => ({
+      name, region, country, latitude, longitude,
+    }));
     return res.json({ results });
   } catch (error) {
     const code = isTimeoutError(error) ? 504 : 502;
@@ -544,8 +673,58 @@ app.post("/api/assistant", rateLimiters.assistant.middleware, async (req, res) =
     return res.status(400).json({ error: parsed.error });
   }
   const { question, profile, latitude, longitude } = parsed.value;
+  const normalized = normalizeQuestion(question);
+  const local = classifyLocalDomain(normalized);
+  const intent = extractLocationIntent(normalized);
 
-  // Server-side fetch only. Client-supplied air measurements are ignored entirely.
+  // Named places are resolved only for environmental questions. An unrelated
+  // question that happens to contain "in <Name>" keeps the selected location
+  // and the existing refusal. Client-supplied readings are never accepted.
+  if (!detectPromptInjection(normalized) && local.category !== "unrelated" && intent.kind === "clarify") {
+    return res.json({
+      answer: clarificationAnswer(intent),
+      evidence: [],
+      mode: "location-clarification",
+      locations: [],
+    });
+  }
+  if (!detectPromptInjection(normalized) && local.category !== "unrelated" && intent.kind === "named") {
+    const now = Date.now();
+    const resolved = await Promise.all(intent.names.map((name) => resolveNamedLocation(name, profile, now)));
+    const extra = (intent.extra || []).map((name) => ({
+      query: name,
+      status: "unavailable",
+      source: "named",
+      decision: null,
+      note: "Only four places are resolved at a time. This place was not fetched.",
+    }));
+    const locations = [...resolved, ...extra];
+    if (!intent.comparison) {
+      const only = resolved[0];
+      if (!only || only.status !== "ready") {
+        return res.json({
+          answer: describeLocationAnswer(locations, null),
+          evidence: [],
+          mode: "rules",
+          locations: locations.map(publicLocation),
+        });
+      }
+      const label = placeLabel(only);
+      const { result, hypothetical } = await answerForTrusted(question, profile, only.trusted, only.decision, label);
+      return res.json(assistantPayload(result, only.decision, hypothetical, {
+        locations: locations.map(publicLocation),
+      }));
+    }
+    const comparison = buildComparison(locations);
+    return res.json({
+      answer: describeLocationAnswer(locations, comparison),
+      evidence: [],
+      mode: "rules",
+      locations: locations.map(publicLocation),
+      comparison,
+    });
+  }
+
   let trusted;
   try {
     trusted = await fetchTrustedEnvironmentalData(latitude, longitude);
@@ -555,24 +734,9 @@ app.post("/api/assistant", rateLimiters.assistant.middleware, async (req, res) =
       error: "Trusted environmental data is temporarily unavailable. Please try again shortly.",
     });
   }
-
-  const evaluatedAt = Date.now();
-  const decision = buildExposureDecision(trusted, profile, evaluatedAt);
-  const context = buildRecommendationContext(trusted, profile, question, decision);
-  const assumedWind = parseWindHypothetical(question);
-  const hypothetical = assumedWind === null ? null : buildWindHypothetical(trusted, profile, assumedWind, evaluatedAt);
-  const result = await askGemini(question, context, trusted, decision, { hypothetical });
-  const answered = result.mode === "ai" || result.mode === "rules" || result.mode === "rules-fallback";
-  return res.json({
-    answer: result.answer,
-    evidence: result.evidence || [],
-    mode: result.mode,
-    decision,
-    ...(answered && hypothetical ? { hypothetical } : {}),
-    ...(result.structured ? { structured: result.structured } : {}),
-    ...(result.note ? { note: result.note } : {}),
-    ...(answered ? { context } : {}),
-  });
+  const decision = buildExposureDecision(trusted, profile, Date.now());
+  const { result, hypothetical } = await answerForTrusted(question, profile, trusted, decision);
+  return res.json(assistantPayload(result, decision, hypothetical));
 });
 
 // ---------- Static frontend + SPA fallback ----------

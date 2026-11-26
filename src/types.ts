@@ -122,11 +122,43 @@ export type WindHypothetical = {
   windDisclosure: string;
 };
 
+export type AssistantPlace = { name: string; region?: string; country?: string };
+
+export type AssistantLocation = {
+  query: string;
+  status: "ready" | "ambiguous" | "unresolved" | "geocoding_unavailable" | "environment_data_unavailable" | "unavailable";
+  source?: "named" | "selected";
+  name?: string;
+  region?: string;
+  country?: string;
+  latitude?: number;
+  longitude?: number;
+  candidates?: AssistantPlace[];
+  aqi?: number | null;
+  aqiScale?: string;
+  pm25?: number | null;
+  weatherAvailable?: boolean;
+  retrievedAt?: string | null;
+  weatherRetrievedAt?: string | null;
+  decision?: ExposureDecision | null;
+  note?: string;
+};
+
+export type AssistantComparison = {
+  compared: string[];
+  excluded: { query: string; reason: string }[];
+  lowestReportedAqi: { query: string; aqi: number; name?: string } | null;
+  tied: boolean;
+  statement: string;
+};
+
 export type AssistantResponse = {
   answer: string;
   evidence?: string[];
   mode: string;
   decision?: ExposureDecision;
+  locations?: AssistantLocation[];
+  comparison?: AssistantComparison | null;
   hypothetical?: WindHypothetical | null;
   structured?: { recommendation?: string; claimIds?: string[]; explanation?: string };
   note?: string;

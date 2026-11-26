@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Activity, ArrowUpRight, Bot, Clock, Cloud, Compass, Crosshair, Leaf, MapPin, MessageCircle, RefreshCw, Search, Send, ShieldCheck, Wind, X } from "lucide-react";
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { askAssistant, findGoWindow, getAirQuality, reverseGeocode, searchLocations } from "./api";
-import type { AirData, DecisionTrace, ExposureDecision, GoWindowResponse, GoWindowTimePreference, LocationResult, Profile, WindHypothetical } from "./types";
+import type { AirData, AssistantLocation, DecisionTrace, ExposureDecision, GoWindowResponse, GoWindowTimePreference, LocationResult, Profile, WindHypothetical } from "./types";
 import { describeCurrentActivityGuidance, describeWindUse, formatReportedWindSpeed, formatSourceDisclosure, formatTimingDisclosure, getAqiPresentation, getFreshnessPresentation, isLatestRequest, shouldApplyGpsResult, US_AQI_CATEGORIES } from "./reliability";
 import { buildGoWindowRequest, DEFAULT_GO_WINDOW_DURATION, DEFAULT_TIME_PREFERENCE, goWindowRequestKey } from "./gowindow";
 import GoWindowPanel from "./GoWindowPanel";
@@ -78,6 +78,7 @@ function App() {
   const [thinking, setThinking] = useState(false);
   const [mode, setMode] = useState("");
   const [decision, setDecision] = useState<ExposureDecision | null>(null);
+  const [locations, setLocations] = useState<AssistantLocation[]>([]);
   const [assistantError, setAssistantError] = useState("");
   const [duration, setDuration] = useState(DEFAULT_GO_WINDOW_DURATION);
   const [timePreference, setTimePreference] = useState<GoWindowTimePreference>(DEFAULT_TIME_PREFERENCE);
@@ -320,11 +321,12 @@ function App() {
     assistantAbortRef.current?.abort();
     const controller = new AbortController();
     assistantAbortRef.current = controller;
-    setThinking(true); setAnswer(""); setEvidence([]); setHypothetical(null); setAssistantError(""); setDecision(null); setMode(""); setAskedQuestion(q.trim());
+    setThinking(true); setAnswer(""); setEvidence([]); setHypothetical(null); setAssistantError(""); setDecision(null); setLocations([]); setMode(""); setAskedQuestion(q.trim());
     try {
       const result = await askAssistant(q, profile, { lat: loc.lat, lon: loc.lon }, controller.signal);
       if (!isLatestRequest(requestId, assistantRequestRef.current)) return;
-      setAnswer(result.answer); setEvidence(result.evidence || []); setHypothetical(result.hypothetical || null); setMode(result.mode); setDecision(result.decision || null);
+      const named = result.locations || [];
+      setAnswer(result.answer); setEvidence(result.evidence || []); setHypothetical(result.hypothetical || null); setMode(result.mode); setLocations(named); setDecision(named.length ? null : (result.decision || null));
     } catch (e) {
       if (controller.signal.aborted) return;
       if (isLatestRequest(requestId, assistantRequestRef.current)) {
@@ -515,7 +517,8 @@ function App() {
           <div className="profile-row"><div className="profile-heading"><Bot size={17}/><b>Using the GoWindow activity profile</b></div><a className="profile-link" href="#gowindow">Change activity or profile</a></div>
           <p className="profile-summary">{profile.activity} · {profile.ageGroup} · {profile.sensitivity}</p>
           <div className="prompt-list">{prompts.map(p => <button key={p} onClick={() => submit(p)} disabled={thinking || !air}>{p}<ArrowUpRight size={13}/></button>)}</div>
-          {decision && <div className="decision-card">
+          {decision && !locations.length && <div className="decision-card">
+            <p className="location-kicker">Selected location · {loc.label}</p>
             <div className="decision-top">
               <span className={`risk-pill ${decision.overallRisk}`}>{decision.overallRisk.replace("_", " ").toUpperCase()}</span>
               <span className={`rec-pill ${decision.activityRecommendation}`}>{decision.activityRecommendation.replace("_", " ").toUpperCase()}</span>
@@ -526,10 +529,11 @@ function App() {
             {decision.activityRecommendation !== "suitable" && <p className="decision-alt"><b>Alternative:</b> {decision.alternativeActivity}</p>}
             <p className="decision-limitations">{decision.limitations}</p>
           </div>}
-          {(askedQuestion || answer) && <div className={`answer-box${mode === "declined" ? " declined" : mode === "ambiguous" ? " ambiguous" : mode === "classification-unavailable" ? " unavailable" : ""}`} ref={assistantResultRef} tabIndex={-1}>
-            <div className="answer-title"><Bot size={16}/> AirSense says <span>{mode === "ai" ? "GENERATIVE AI" : mode === "declined" ? "OUT OF SCOPE" : mode === "ambiguous" ? "CLARIFICATION" : mode === "classification-unavailable" ? "EXPLANATION UNAVAILABLE" : "SAFETY ENGINE"}</span></div>
+          {(askedQuestion || answer) && <div className={`answer-box${mode === "declined" ? " declined" : mode === "ambiguous" || mode === "location-clarification" ? " ambiguous" : mode === "classification-unavailable" ? " unavailable" : ""}`} ref={assistantResultRef} tabIndex={-1}>
+            <div className="answer-title"><Bot size={16}/> AirSense says <span>{mode === "ai" ? "GENERATIVE AI" : mode === "declined" ? "OUT OF SCOPE" : mode === "ambiguous" || mode === "location-clarification" ? "CLARIFICATION" : mode === "classification-unavailable" ? "EXPLANATION UNAVAILABLE" : "SAFETY ENGINE"}</span></div>
             {askedQuestion && <p className="asked-question"><b>You asked.</b> {askedQuestion}</p>}
             {answer && <p className="ai-explanation">{answer}</p>}
+            {locations.length > 0 && <LocationAnswers locations={locations} />}
             {mode === "ai" && evidence.length > 0 && <div className="evidence-block"><b>Evidence from the current reading</b><ul>{evidence.map((item) => <li key={item}>{item}</li>)}</ul></div>}
             {hypothetical && <div className="hypothetical-block"><b>{hypothetical.label}</b><p>{hypothetical.note} Assumed wind {hypothetical.assumedWindSpeedKmh} km/h would be {hypothetical.activityRecommendation.replace(/_/g, " ")}. {hypothetical.recommendedAction}</p><p>{hypothetical.windDisclosure}</p></div>}
             {decision?.trace && <DecisionTracePanel trace={decision.trace} />}
@@ -544,6 +548,44 @@ function App() {
     </main>
   </div>;
 }
+function locationTitle(location: AssistantLocation) {
+  return [location.name || location.query, location.region, location.country].filter(Boolean).join(", ");
+}
+
+function locationStatusLabel(status: AssistantLocation["status"]) {
+  if (status === "ambiguous") return "Ambiguous place";
+  if (status === "unresolved") return "Unresolved place";
+  if (status === "geocoding_unavailable") return "Location search unavailable";
+  if (status === "environment_data_unavailable") return "Air-quality data unavailable";
+  if (status === "unavailable") return "Not fetched";
+  return "Resolved place";
+}
+
+function LocationAnswers({ locations }: { locations: AssistantLocation[] }) {
+  return <div className="location-answers">
+    {locations.map((location) => <article key={`${location.query}-${location.status}`} className="location-result" data-status={location.status}>
+      {location.status !== "ready" && <p className="location-kicker">{locationStatusLabel(location.status)}</p>}
+      <h3>{locationTitle(location)}</h3>
+      <p className="location-meta">Requested place {location.query}</p>
+      {location.status === "ready" ? <>
+        <p className="location-meta">Server coordinates {location.latitude}, {location.longitude}</p>
+        <div className="location-metrics">
+          <span>{location.aqiScale || "US AQI"} {location.aqi ?? "unavailable"}</span>
+          <span>PM2.5 {location.pm25 ?? "unavailable"}</span>
+          <span>{location.weatherAvailable ? "Weather retrieved" : "Weather unavailable"}</span>
+          <span>{location.decision?.activityRecommendation?.replace(/_/g, " ") || "no recommendation"}</span>
+        </div>
+        {location.decision && <p className="decision-reasoning">{location.decision.recommendedAction}</p>}
+        <p className="location-meta">Air retrieved {location.retrievedAt || "unavailable"} · Weather retrieved {location.weatherRetrievedAt || "unavailable"}</p>
+        {location.decision?.trace && <DecisionTracePanel trace={location.decision.trace} />}
+      </> : <>
+        {location.status === "environment_data_unavailable" && location.latitude !== undefined && location.longitude !== undefined && <p className="location-meta">Matched coordinates {location.latitude}, {location.longitude}. No air-quality reading is available.</p>}
+        <p className="decision-reasoning">{location.note || "This place is unavailable."}{location.candidates?.length ? ` ${location.candidates.map((candidate) => [candidate.name, candidate.region, candidate.country].filter(Boolean).join(", ")).join("; ")}` : ""}</p>
+      </>}
+    </article>)}
+  </div>;
+}
+
 function DecisionTracePanel({ trace }: { trace: DecisionTrace }) {
   return <details className="decision-trace">
     <summary>How AirSense reached this result</summary>

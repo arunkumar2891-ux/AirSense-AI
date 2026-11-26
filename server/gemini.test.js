@@ -1432,3 +1432,34 @@ test("the explainer cannot replace the deterministic exposure decision", async (
   assert.equal(result.decision, decision);
   assert.equal(result.structured, null);
 });
+
+test("an explanation that names another city is rejected and the decision object is unchanged", async () => {
+  const air = modelledAir();
+  const decision = buildExposureDecision(air, profile, NOW);
+  const trace = structuredClone(decision.trace);
+  const question = "What is the AQI in Delhi?";
+  const deterministicContext = buildRecommendationContext(air, profile, question, decision);
+  const place = "Delhi, Delhi, India";
+  const foreign = `${explanationFor(decision, "Delhi")} Bengaluru is a different place from this result.`;
+  assert.match(validateExplanation(foreign, { air, decision, place, question }), /place other than the resolved location/);
+  const reverse = `${explanationFor(decision, "Bengaluru")} Delhi is a different place from this result.`;
+  assert.match(validateExplanation(reverse, { air, decision, place: "Bengaluru, Karnataka, India", question: "What is the AQI in Bengaluru?" }), /place other than the resolved location/);
+  assert.equal(validateExplanation(explanationFor(decision, "Delhi"), { air, decision, place, question }), null);
+  assert.equal(validateExplanation(explanationFor(decision, "the goal and the reading"), { air, decision, place, question }), null);
+  assert.equal(validateExplanation(explanationFor(decision, "an indelible reminder"), { air, decision, place, question }), null);
+  assert.equal(validateExplanation(explanationFor(decision, "Nice"), { air, decision, place: "Nice, France", question: "How is the air in Nice?" }), null);
+
+  mockBehavior = { type: "success", body: { recommendation: decision.activityRecommendation, claimIds: ["us_aqi"], explanation: foreign } };
+  const rejected = await askGemini(question, deterministicContext, air, decision, { place });
+  assert.equal(rejected.mode, "rules-fallback");
+  assert.equal(rejected.answer, deterministicContext.answer);
+  assert.equal(rejected.structured, null);
+  assert.equal(rejected.decision, decision);
+  assert.deepEqual(rejected.decision.trace, trace);
+
+  mockBehavior = { type: "timeout" };
+  const failed = await askGemini(question, deterministicContext, air, decision, { place });
+  assert.equal(failed.mode, "rules-fallback");
+  assert.equal(failed.decision, decision);
+  assert.deepEqual(failed.decision.trace, trace);
+});
