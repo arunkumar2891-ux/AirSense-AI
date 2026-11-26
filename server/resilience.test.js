@@ -10,6 +10,7 @@ const REAL_FETCH = globalThis.fetch;
 let upstreamCalls = [];
 let weatherMode = "ok";
 let airMode = "ok";
+let geocodeMode = "ok";
 let weatherBody = null;
 let forecastBody = null;
 
@@ -57,6 +58,17 @@ globalThis.fetch = async (url, options) => {
   if (target.includes("api.open-meteo.com/v1/forecast")) {
     if (weatherMode === "timeout") throw timeoutError();
     if (weatherMode === "http") return { ok: false, status: 500, json: async () => ({ detail: "secret weather failure" }) };
+    if (weatherMode === "forbidden") return { ok: false, status: 403, headers: { "x-api-key": "sk-test-secret" }, json: async () => ({ detail: "secret weather failure", apiKey: "sk-test-secret" }) };
+    if (weatherMode === "dns") {
+      const error = new TypeError("fetch failed");
+      error.cause = { code: "ENOTFOUND", hostname: "api.open-meteo.com", message: "https://api.open-meteo.com/v1/forecast?latitude=64.15&longitude=-21.94" };
+      throw error;
+    }
+    if (weatherMode === "dirty-code") {
+      const error = new TypeError("fetch failed");
+      error.cause = { code: "BAD latitude=64.15" };
+      throw error;
+    }
     if (weatherMode === "malformed") return { ok: true, json: async () => ({ error: "not a forecast" }) };
     if (weatherMode === "null") return { ok: true, json: async () => null };
     if (target.includes("hourly=") && forecastBody) return { ok: true, json: async () => forecastBody };
@@ -64,6 +76,7 @@ globalThis.fetch = async (url, options) => {
     return { ok: true, json: async () => weatherPayload() };
   }
   if (target.includes("geocoding-api.open-meteo.com")) {
+    if (geocodeMode === "http") return { ok: false, status: 503, json: async () => ({ reason: "secret place failure" }) };
     return { ok: true, json: async () => ({ results: [{ name: "Hyderabad", latitude: 17.38, longitude: 78.48, admin1: "Telangana", country: "India" }] }) };
   }
   return { ok: false, status: 404, json: async () => ({}) };
@@ -114,6 +127,7 @@ test.beforeEach(() => {
   upstreamCalls = [];
   weatherMode = "ok";
   airMode = "ok";
+  geocodeMode = "ok";
   weatherBody = null;
   forecastBody = null;
   for (const key of [...cache.entries.keys()]) {
@@ -520,5 +534,187 @@ test("GoWindow stays insufficient when weather is missing and does not open a wi
   assert.match(response.body.error, /temporarily unavailable/i);
   assert.equal(response.body.status, undefined);
   assert.equal(response.body.windows, undefined);
+});
+
+function captureDiagnostics(run) {
+  const lines = [];
+  const original = console.error;
+  console.error = (...args) => {
+    lines.push(args.map((arg) => String(arg)).join(" "));
+  };
+  return Promise.resolve()
+    .then(run)
+    .finally(() => {
+      console.error = original;
+    })
+    .then((result) => ({
+      result,
+      entries: lines.filter((line) => line.startsWith("{")).map((line) => JSON.parse(line)),
+      lines,
+    }));
+}
+
+function assertDiagnosticIsSafe(entry) {
+  const encoded = JSON.stringify(entry);
+  for (const secret of ["https://", "latitude", "longitude", "64.15", "-21.94", "open-meteo", "secret", "User-Agent", "sk-test", "apiKey", "x-api-key", "not a forecast", "SecretPlace"]) {
+    assert.equal(encoded.includes(secret), false, secret);
+  }
+  assert.equal(typeof entry.elapsedMs, "number");
+  assert.equal(Number.isInteger(entry.elapsedMs), true);
+  assert.ok(entry.elapsedMs >= 0);
+  assert.equal(entry.event, "provider_request_failed");
+}
+
+function assertProviderDetailsStayPrivate(body) {
+  const encoded = JSON.stringify(body);
+  for (const secret of ["secret", "sk-test", "apiKey", "x-api-key", "not a forecast", "TimeoutError", "ENOTFOUND", "Data provider", "Invalid provider", "SecretPlace"]) {
+    assert.equal(encoded.includes(secret), false, secret);
+  }
+}
+
+test("current-weather timeout is logged without changing the public air response", async () => {
+  clearPlaceCache();
+  weatherMode = "timeout";
+  const { result, entries } = await captureDiagnostics(() => readAir());
+  assert.equal(result.status, 200);
+  assert.equal(result.body.aqi, 80);
+  assert.deepEqual(result.body.weather, {});
+  assert.equal(result.body.weatherRetrievedAt, null);
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].endpointClass, "current-weather");
+  assert.equal(entries[0].failureStage, "timeout");
+  assert.equal(entries[0].errorName, "TimeoutError");
+  assert.equal(entries[0].httpStatus, undefined);
+  assert.equal(entries[0].errorCode, undefined);
+  assertDiagnosticIsSafe(entries[0]);
+  assertProviderDetailsStayPrivate(result.body);
+});
+
+test("current-weather HTTP 403 is logged as http and the provider body stays private", async () => {
+  clearPlaceCache();
+  weatherMode = "forbidden";
+  const { result, entries } = await captureDiagnostics(() => readAir());
+  assert.equal(result.status, 200);
+  assert.deepEqual(result.body.weather, {});
+  assert.equal(result.body.weatherRetrievedAt, null);
+  assert.equal(result.body.aqi, 80);
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].endpointClass, "current-weather");
+  assert.equal(entries[0].failureStage, "http");
+  assert.equal(entries[0].httpStatus, 403);
+  assert.equal(entries[0].errorName, "Error");
+  assert.equal(entries[0].errorCode, undefined);
+  assertDiagnosticIsSafe(entries[0]);
+  assertProviderDetailsStayPrivate(result.body);
+  assert.equal(JSON.stringify(result.body).includes("403"), false);
+});
+
+test("invalid current-weather shape is logged as validation and is not cached", async () => {
+  clearPlaceCache();
+  weatherMode = "malformed";
+  const { result, entries } = await captureDiagnostics(() => readAir());
+  assert.equal(result.status, 200);
+  assert.deepEqual(result.body.weather, {});
+  assert.equal(result.body.weatherRetrievedAt, null);
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].endpointClass, "current-weather");
+  assert.equal(entries[0].failureStage, "validation");
+  assert.equal(entries[0].errorName, "Error");
+  assert.equal(entries[0].httpStatus, undefined);
+  assertDiagnosticIsSafe(entries[0]);
+  assertProviderDetailsStayPrivate(result.body);
+  assert.equal([...cache.entries.keys()].some((key) => key.includes("api.open-meteo.com/v1/forecast") && !key.includes("hourly=")), false);
+
+  weatherMode = "ok";
+  const recovered = await captureDiagnostics(() => readAir());
+  assert.equal(recovered.entries.length, 0);
+  assert.equal(recovered.result.body.weather.wind_speed_10m, 12);
+  assert.ok(recovered.result.body.weatherRetrievedAt);
+});
+
+test("forecast-weather failure is logged separately and GoWindow keeps its generic error", async () => {
+  clearPlaceCache();
+  weatherMode = "timeout";
+  const { result, entries } = await captureDiagnostics(() => request(app, {
+    method: "POST",
+    url: "/api/gowindow",
+    body: {
+      latitude,
+      longitude,
+      activity: "running",
+      profile: { ageGroup: "adult", sensitivity: "general" },
+      durationMinutes: 60,
+    },
+  }));
+  assert.equal(result.status, 504);
+  assert.deepEqual(result.body, { error: "Forecast data is temporarily unavailable." });
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].endpointClass, "forecast-weather");
+  assert.equal(entries[0].failureStage, "timeout");
+  assert.equal(entries[0].errorName, "TimeoutError");
+  assert.equal(entries[0].httpStatus, undefined);
+  assertDiagnosticIsSafe(entries[0]);
+  assertProviderDetailsStayPrivate(result.body);
+
+  clearPlaceCache();
+  weatherMode = "http";
+  const httpFailure = await captureDiagnostics(() => fetchTrustedForecast(latitude, longitude).then(
+    () => { throw new Error("forecast should have failed"); },
+    (error) => error,
+  ));
+  assert.equal(httpFailure.result.message, "Data provider returned 500");
+  assert.equal(httpFailure.result.name, "Error");
+  assert.equal(httpFailure.entries.length, 1);
+  assert.equal(httpFailure.entries[0].endpointClass, "forecast-weather");
+  assert.equal(httpFailure.entries[0].failureStage, "http");
+  assert.equal(httpFailure.entries[0].httpStatus, 500);
+  assertDiagnosticIsSafe(httpFailure.entries[0]);
+  assert.equal(JSON.stringify(httpFailure.result).includes("secret"), false);
+});
+
+test("provider diagnostics keep a sanitized error code and ignore unlabeled hosts", async () => {
+  clearPlaceCache();
+  weatherMode = "dns";
+  const dns = await captureDiagnostics(() => readAir());
+  assert.equal(dns.result.status, 200);
+  assert.deepEqual(dns.result.body.weather, {});
+  assert.equal(dns.entries.length, 1);
+  assert.equal(dns.entries[0].endpointClass, "current-weather");
+  assert.equal(dns.entries[0].failureStage, "network");
+  assert.equal(dns.entries[0].errorName, "TypeError");
+  assert.equal(dns.entries[0].errorCode, "ENOTFOUND");
+  assertDiagnosticIsSafe(dns.entries[0]);
+  assertProviderDetailsStayPrivate(dns.result.body);
+
+  clearPlaceCache();
+  weatherMode = "dirty-code";
+  const dirty = await captureDiagnostics(() => readAir());
+  assert.equal(dirty.result.status, 200);
+  assert.equal(dirty.entries.length, 1);
+  assert.equal(dirty.entries[0].errorCode, undefined);
+  assert.equal(dirty.entries[0].failureStage, "network");
+  assertDiagnosticIsSafe(dirty.entries[0]);
+  assertProviderDetailsStayPrivate(dirty.result.body);
+
+  clearPlaceCache();
+  airMode = "timeout";
+  weatherMode = "ok";
+  const air = await captureDiagnostics(() => readAir());
+  assert.equal(air.result.status, 504);
+  assert.deepEqual(air.result.body, { error: "Current environmental data is temporarily unavailable." });
+  assert.equal(air.entries.length, 1);
+  assert.equal(air.entries[0].endpointClass, "air-quality");
+  assert.equal(air.entries[0].failureStage, "timeout");
+  assert.equal(air.entries[0].errorName, "TimeoutError");
+  assertDiagnosticIsSafe(air.entries[0]);
+  assertProviderDetailsStayPrivate(air.result.body);
+
+  geocodeMode = "http";
+  const geocode = await captureDiagnostics(() => request(app, { url: "/api/geocode?q=SecretPlaceZZ" }));
+  assert.equal(geocode.result.status, 502);
+  assert.deepEqual(geocode.result.body, { error: "Location search is temporarily unavailable." });
+  assert.equal(geocode.entries.length, 0);
+  assert.equal(geocode.lines.some((line) => line.includes("SecretPlace")), false);
+  assertProviderDetailsStayPrivate(geocode.result.body);
 });
 });

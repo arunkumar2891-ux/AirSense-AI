@@ -80,18 +80,78 @@ const GEOCODE_CACHE_TTL_MS = Math.max(1000, Number(process.env.GEOCODE_CACHE_TTL
 const cache = new BoundedTTLCache({ maxEntries: CACHE_MAX_ENTRIES });
 const geocodeCache = new BoundedTTLCache({ maxEntries: GEOCODE_CACHE_MAX_ENTRIES });
 
+// Labels come only from the fixed host and path. Current and hourly weather
+// share a host, so the hourly parameter's presence separates them. Its value
+// is never read. Geocoding and any other URL stay unlabeled.
+function providerEndpointClass(url) {
+  let parsed;
+  try {
+    parsed = new URL(String(url));
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== "https:" || parsed.username || parsed.password) return null;
+  if (parsed.hostname === "air-quality-api.open-meteo.com" && parsed.pathname === "/v1/air-quality") {
+    return "air-quality";
+  }
+  if (parsed.hostname === "api.open-meteo.com" && parsed.pathname === "/v1/forecast") {
+    return parsed.searchParams.has("hourly") ? "forecast-weather" : "current-weather";
+  }
+  return null;
+}
+
+function providerFailureStage(error, httpStatus) {
+  if (isTimeoutError(error)) return "timeout";
+  if (Number.isInteger(httpStatus)) return "http";
+  if (error instanceof SyntaxError || error?.message === "Invalid provider response shape") return "validation";
+  return "network";
+}
+
+function sanitizedToken(value, pattern) {
+  return typeof value === "string" && pattern.test(value) ? value : null;
+}
+
+function logProviderFailure(endpointClass, elapsedMs, error, httpStatus) {
+  try {
+    if (endpointClass !== "air-quality" && endpointClass !== "current-weather" && endpointClass !== "forecast-weather") return;
+    const entry = {
+      event: "provider_request_failed",
+      endpointClass,
+      elapsedMs,
+      errorName: sanitizedToken(error?.name, /^[A-Za-z][A-Za-z0-9_]{0,63}$/) ?? "Error",
+      failureStage: providerFailureStage(error, httpStatus),
+    };
+    const errorCode = sanitizedToken(error?.cause?.code, /^[A-Z][A-Z0-9_]{0,63}$/);
+    if (errorCode) entry.errorCode = errorCode;
+    if (Number.isInteger(httpStatus) && httpStatus >= 100 && httpStatus <= 599) entry.httpStatus = httpStatus;
+    console.error(JSON.stringify(entry));
+  } catch {
+    // A diagnostic failure must not replace or wrap the provider error.
+  }
+}
+
 async function loadCachedRecord(store, url, ttlMs = ENVIRONMENT_CACHE_TTL_MS, accept = null) {
   const key = String(url);
   return store.getOrLoad(key, ttlMs, async () => {
-    const response = await fetch(key, {
-      headers: { "User-Agent": "AirSenseAI/1.0" },
-      signal: AbortSignal.timeout(10000),
-    });
-    if (!response.ok) throw new Error(`Data provider returned ${response.status}`);
-    const data = await response.json();
-    const record = { data, retrievedAt: new Date().toISOString() };
-    if (accept && !accept(record)) throw new Error("Invalid provider response shape");
-    return record;
+    const startedAt = Date.now();
+    let httpStatus = null;
+    try {
+      const response = await fetch(key, {
+        headers: { "User-Agent": "AirSenseAI/1.0" },
+        signal: AbortSignal.timeout(10000),
+      });
+      if (!response.ok) {
+        httpStatus = response.status;
+        throw new Error(`Data provider returned ${response.status}`);
+      }
+      const data = await response.json();
+      const record = { data, retrievedAt: new Date().toISOString() };
+      if (accept && !accept(record)) throw new Error("Invalid provider response shape");
+      return record;
+    } catch (error) {
+      logProviderFailure(providerEndpointClass(key), Date.now() - startedAt, error, httpStatus);
+      throw error;
+    }
   });
 }
 
