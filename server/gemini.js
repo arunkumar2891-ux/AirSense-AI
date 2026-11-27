@@ -118,8 +118,12 @@ function assertedRecommendations(text) {
   const found = [];
   const lower = text.toLowerCase();
   for (const [phrase, value] of RECOMMENDATION_WORDS) {
-    const re = new RegExp(`(?:recommendation is|result is|decision is|would be)\\s+${phrase}\\b`, "i");
-    if (re.test(lower)) found.push(value);
+    const matches = lower.matchAll(new RegExp(`(?:recommendation is|result is|decision is|would be)\\s+${phrase}\\b`, "gi"));
+    for (const match of matches) {
+      const before = lower.slice(Math.max(0, match.index - 32), match.index);
+      if (/\b(?:walk(?:ing)?|cycl(?:e|ing)|bik(?:e|ing)|bicycle)\b[\s\S]{0,24}$/i.test(before)) continue;
+      found.push(value);
+    }
   }
   return found;
 }
@@ -599,6 +603,246 @@ function grantsTravel(clause, kind) {
   return grantUnlessWithheld(clause, (part) => travelPermission(part, kind));
 }
 
+const ACTIVITY_MISMATCH = "Explanation misstates a deterministic activity recommendation.";
+const ACTIVITY_WORD = "walk(?:ing)?|cycl(?:e|ing)|bicycles?|biking|bike(?:s| ride)?|children'?s outdoor play|outdoor play|play(?:ing)? outdoors?|play(?:ing)? outside";
+
+const ACTIVITY_LABELS = [
+  { source: "\\bnot(?:\\s+\\w+){0,4}\\s+(?:the same as|equivalent to|as suitable as|just as)\\s+suitable\\b", value: "positive", negated: true },
+  { source: "\\b(?:as suitable as|equivalent to suitable|the same as suitable|just as suitable)\\b", value: "positive" },
+  { source: "\\bnot enough data\\b", value: "insufficient_data" },
+  { source: "\\binsufficient[\\s_-]?data\\b", value: "insufficient_data" },
+  { source: "\\b(?:needs|need|using|uses|use|exercise|exercising|calls for|requir(?:e|es|ing))\\s+caution\\b", value: "caution" },
+  { source: "\\bwith caution\\b", value: "caution" },
+  { source: "\\bnot offered\\b", value: "avoid" },
+  { source: "\\bnot recommended\\b", value: "avoid" },
+  { source: "\\bnot advised\\b", value: "avoid" },
+  { source: "\\bnot eligible\\b", value: "avoid" },
+  { source: "\\bnot permitted\\b", value: "avoid" },
+  { source: "\\bnot advisable\\b", value: "avoid" },
+  { source: "\\bstay(?:ing)? indoors\\b", value: "avoid" },
+  { source: "\\bremain indoors\\b", value: "avoid" },
+  { source: "\\b(?:move|moved|moving) indoors\\b", value: "avoid" },
+  { source: "\\b(?:reschedul(?:e|ed|ing)|postpon(?:e|ed|ing))\\b", value: "avoid" },
+  { source: "\\b(?:should not|shouldn't|cannot|can't|cant|do not|don't|dont|must not|mustn't)\\s+(?:still\\s+)?(?:play|go|walk|cycle|bike|ride)\\b", value: "avoid" },
+  { source: "\\b(?:can|may|could|should)\\s+(?:still\\s+)?(?:play|go|walk|cycle|bike|ride)\\b", value: "positive", modal: true },
+  { source: "\\bunsuitable\\b", value: "suitable", negated: true },
+  { source: "\\bunsafe\\b", value: "positive", negated: true },
+  { source: "\\bgood time\\b", value: "positive" },
+  { source: "\\bgreat time\\b", value: "positive" },
+  { source: "\\bsuitable\\b", value: "suitable" },
+  { source: "\\bcaution\\b", value: "caution" },
+  { source: "\\bavoid(?:ed|ing)?\\b", value: "avoid" },
+  { source: "\\bsafe\\b", value: "positive" },
+  { source: "\\bfine\\b", value: "positive" },
+  { source: "\\bacceptable\\b", value: "positive" },
+  { source: "\\bokay\\b", value: "positive" },
+  { source: "\\bok\\b", value: "positive" },
+  { source: "\\ballowed\\b", value: "positive" },
+  { source: "\\bpermitted\\b", value: "positive" },
+  { source: "\\brecommended\\b", value: "positive" },
+];
+
+function storedRecommendation(value) {
+  return value === "suitable" || value === "caution" || value === "avoid" || value === "insufficient_data" ? value : "";
+}
+
+function expectedActivityRecommendations(plan) {
+  return {
+    walking: storedRecommendation(plan?.activeTravel?.walking?.decision?.activityRecommendation),
+    cycling: storedRecommendation(plan?.activeTravel?.cycling?.decision?.activityRecommendation),
+    childOutdoor: plan?.basis?.childPresent === true ? storedRecommendation(plan?.decision?.activityRecommendation) : "",
+  };
+}
+
+function activityKind(word) {
+  const text = String(word || "").toLowerCase();
+  if (/^walk/.test(text)) return "walking";
+  if (/^(?:cycl|bik|bicycle)/.test(text)) return "cycling";
+  return "childOutdoor";
+}
+
+function findActivitySpans(text) {
+  const spans = [];
+  const patterns = [
+    ["walking", /\bwalk(?:ing)?\b/gi],
+    ["cycling", /\b(?:cycl(?:e|ing)|bicycles?|biking|bike(?:s| ride)?)\b/gi],
+    ["childOutdoor", /\b(?:children'?s outdoor play|outdoor play|play(?:ing)? outdoors?|play(?:ing)? outside)\b/gi],
+    ["childOutdoor", /\b(?:kids?|children|child)\b(?:\s+\w+){0,6}\s+play(?:ing)?\b(?:\s+\w+){0,4}\s+(?:outside|outdoors|park)\b/gi],
+    ["childOutdoor", /\b(?:kids?|children|child)\b[\s\S]{0,32}\b(?:go(?:ing)? outside|play(?:ing)? outdoors?|play(?:ing)? outside)\b/gi],
+  ];
+  for (const [kind, pattern] of patterns) {
+    for (const match of text.matchAll(pattern)) {
+      spans.push({ kind, start: match.index, end: match.index + match[0].length });
+    }
+  }
+  const people = /\b(?:kids?|children|child)\b/i.exec(text);
+  if (people && /\b(?:stay(?:ing)? indoors|remain indoors|move(?:d|ing)? indoors)\b/i.test(text)) {
+    spans.push({ kind: "childOutdoor", start: people.index, end: people.index + people[0].length });
+  }
+  return spans;
+}
+
+function labelNegated(text, start) {
+  const before = text.slice(Math.max(0, start - 48), start);
+  if (/\b(?:rather than|instead of|but not|and not)\b[\s\S]{0,40}$/i.test(before)) return true;
+  return /(?:\b(?:not|never|no|without)\b|\b(?:isn't|aren't|wasn't|weren't|don't|doesn't|cannot|can't|cant|won't|isnt|arent|dont|doesnt)\b)(?:\s+\w+){0,3}\s*$/i.test(before);
+}
+
+function scheduleSuitable(text, start, end) {
+  return /^\s+windows?\b/i.test(text.slice(end, end + 16));
+}
+
+function householdScopedLabel(text, start) {
+  const before = text.slice(Math.max(0, start - 32), start);
+  if (!/(?:recommendation is|result is|decision is|would be)\s*$/i.test(before)) return false;
+  return !new RegExp(`\\b(?:${ACTIVITY_WORD})\\b[\\s\\S]{0,32}$`, "i").test(before);
+}
+
+function findActivityLabels(text) {
+  const found = [];
+  for (const spec of ACTIVITY_LABELS) {
+    for (const match of text.matchAll(new RegExp(spec.source, "gi"))) {
+      const start = match.index;
+      const end = start + match[0].length;
+      if (spec.value === "suitable" && scheduleSuitable(text, start, end)) continue;
+      found.push({
+        start,
+        end,
+        value: spec.value,
+        negated: spec.negated === true || labelNegated(text, start),
+        modal: spec.modal === true,
+      });
+    }
+  }
+  found.sort((left, right) => left.start - right.start || (right.end - right.start) - (left.end - left.start));
+  const chosen = [];
+  let cursor = -1;
+  for (const label of found) {
+    if (label.start < cursor) continue;
+    chosen.push(label);
+    cursor = label.end;
+  }
+  return chosen;
+}
+
+function maskSpans(text, spans) {
+  let masked = text;
+  for (const span of [...spans].sort((left, right) => right.start - left.start)) {
+    masked = `${masked.slice(0, span.start)}${" ".repeat(Math.max(0, span.end - span.start))}${masked.slice(span.end)}`;
+  }
+  return masked;
+}
+
+function sharedActivityClaims(sentence, labels) {
+  const claims = [];
+  const consumed = [];
+  const pattern = new RegExp(`\\b(${ACTIVITY_WORD})\\b(?!\\s+(?:is|are|was|were|remains|needs|need)\\b)(?:\\s+\\w+){0,5}\\s*,?\\s+(?:and|&)\\s+(${ACTIVITY_WORD})\\b[\\s\\S]{0,40}?\\b(?:are|were|remain|stay|look|seem)\\b`, "gi");
+  for (const match of sentence.matchAll(pattern)) {
+    const verbEnd = match.index + match[0].length;
+    const label = labels.find((item) => item.start >= verbEnd && item.start <= verbEnd + 32);
+    if (!label) continue;
+    for (const kind of new Set([activityKind(match[1]), activityKind(match[2])])) {
+      claims.push({ kind, value: label.value, negated: label.negated, modal: label.modal });
+    }
+    consumed.push(label);
+  }
+  const forward = new RegExp(`\\b(suitable|safe|fine|acceptable|okay|caution)\\b[\\s\\S]{0,16}\\b(?:for|to)\\s+(${ACTIVITY_WORD})\\s+(?:and|&)\\s+(${ACTIVITY_WORD})\\b`, "gi");
+  for (const match of sentence.matchAll(forward)) {
+    const value = /caution/i.test(match[1]) ? "caution" : /suitable/i.test(match[1]) ? "suitable" : "positive";
+    const negated = labelNegated(sentence, match.index);
+    for (const kind of new Set([activityKind(match[2]), activityKind(match[3])])) {
+      claims.push({ kind, value, negated, modal: false });
+    }
+    consumed.push({ start: match.index, end: match.index + match[1].length });
+  }
+  return { claims, consumed };
+}
+
+function nearestActivity(activities, label) {
+  const before = activities
+    .filter((activity) => activity.end <= label.start)
+    .map((activity) => ({ activity, distance: label.start - activity.end }))
+    .filter((item) => item.distance <= 64)
+    .sort((left, right) => left.distance - right.distance);
+  if (before.length) {
+    if (before[1] && before[1].distance <= before[0].distance + 12) return { ambiguous: true };
+    return { activity: before[0].activity };
+  }
+  const after = activities
+    .filter((activity) => activity.start >= label.end)
+    .map((activity) => ({ activity, distance: activity.start - label.end }))
+    .filter((item) => item.distance <= 32)
+    .sort((left, right) => left.distance - right.distance);
+  if (!after.length) return { ambiguous: false };
+  if (after[1] && after[1].distance <= after[0].distance + 12) return { ambiguous: true };
+  return { activity: after[0].activity };
+}
+
+function claimsConflict(expected, claims) {
+  const denied = claims.filter((claim) => claim.negated);
+  const active = claims.filter((claim) => !claim.negated);
+  if (denied.some((claim) => claim.value === expected || (expected === "suitable" && claim.value === "positive"))) return true;
+  if (!active.length) return false;
+  if (expected === "suitable") return active.some((claim) => claim.value !== "suitable" && claim.value !== "positive");
+  if (expected === "caution") {
+    const hasCaution = active.some((claim) => claim.value === "caution");
+    return active.some((claim) => claim.value !== "caution" && !(claim.modal && hasCaution));
+  }
+  if (expected === "avoid") return active.some((claim) => claim.value !== "avoid");
+  if (expected === "insufficient_data") return active.some((claim) => claim.value !== "insufficient_data" && claim.value !== "avoid");
+  return false;
+}
+
+function misstatedActivityRecommendation(sentence, plan) {
+  const expected = expectedActivityRecommendations(plan);
+  if (!expected.walking && !expected.cycling && !expected.childOutdoor) return null;
+  const labels = findActivityLabels(sentence).filter((label) => !householdScopedLabel(sentence, label.start));
+  const shared = sharedActivityClaims(sentence, labels);
+  const claimed = new Map(Object.keys(expected).map((kind) => [kind, []]));
+  for (const claim of shared.claims) claimed.get(claim.kind)?.push(claim);
+  const masked = maskSpans(sentence, shared.consumed);
+  const unattached = [];
+  let carriedKinds = [];
+  for (const part of polarityParts(masked)) {
+    const activities = findActivitySpans(part);
+    const labelsInPart = findActivityLabels(part).filter((label) => !householdScopedLabel(part, label.start));
+    if (!activities.length) {
+      if (!carriedKinds.length) {
+        unattached.push(...labelsInPart);
+      } else {
+        for (const label of labelsInPart) {
+          for (const kind of carriedKinds) claimed.get(kind)?.push({ kind, value: label.value, negated: label.negated, modal: label.modal });
+        }
+      }
+      continue;
+    }
+    carriedKinds = [...new Set(activities.map((activity) => activity.kind))];
+    for (const label of labelsInPart) {
+      const nearest = nearestActivity(activities, label);
+      if (!nearest.activity) {
+        for (const kind of carriedKinds) claimed.get(kind)?.push({ kind, value: label.value, negated: label.negated, modal: label.modal });
+        continue;
+      }
+      if (nearest.ambiguous) return ACTIVITY_MISMATCH;
+      claimed.get(nearest.activity.kind)?.push({
+        kind: nearest.activity.kind,
+        value: label.value,
+        negated: label.negated,
+        modal: label.modal,
+      });
+    }
+  }
+  for (const [kind, recommendation] of Object.entries(expected)) {
+    if (recommendation && claimsConflict(recommendation, claimed.get(kind) || [])) return ACTIVITY_MISMATCH;
+  }
+  const mentionsActivity = findActivitySpans(sentence).length > 0;
+  for (const label of unattached) {
+    if (label.value === "avoid" && !mentionsActivity) continue;
+    if (Object.values(expected).filter(Boolean).some((recommendation) => claimsConflict(recommendation, [label]))) return ACTIVITY_MISMATCH;
+  }
+  return null;
+}
+
 function travelPermission(clause, kind) {
   const activity = kind === "walking"
     ? "walk(?:ing)?"
@@ -760,6 +1004,8 @@ function contradictsFamilyPlan(text, plan) {
     if (plan?.activeTravel?.cycling?.eligible !== true && grantsTravel(clause, "cycling")) {
       return "Explanation recommends cycling when it is not eligible.";
     }
+    const activityIssue = misstatedActivityRecommendation(clause, plan);
+    if (activityIssue) return activityIssue;
     if (claimsMeasuredIndoor(clause)) return "Explanation claims an indoor air measurement.";
     if (claimsQuantifiedEmissions(clause)) return "Explanation invents an emissions or pollutant quantity.";
   }
@@ -1068,6 +1314,7 @@ const SAFE_CLAIM_REASONS = new Set([
   "Explanation permits a child's outdoor activity against the deterministic decision.",
   "Explanation recommends walking when it is not eligible.",
   "Explanation recommends cycling when it is not eligible.",
+  "Explanation misstates a deterministic activity recommendation.",
   "Explanation claims an indoor air measurement.",
   "Explanation invents an emissions or pollutant quantity.",
 ]);
@@ -1411,6 +1658,53 @@ function familyEvidence(plan, claims) {
   };
 }
 
+function knownTravelRecommendation(travel) {
+  const recommendation = travel?.decision?.activityRecommendation;
+  return recommendation === "suitable" || recommendation === "caution" || recommendation === "avoid" || recommendation === "insufficient_data"
+    ? recommendation
+    : "";
+}
+
+function travelPromptLines(kind, travel) {
+  const name = kind === "walking" ? "Walking" : "Cycling";
+  const recommendation = knownTravelRecommendation(travel);
+  if (travel?.eligible === true) {
+    return [recommendation
+      ? `${name} recommendation is ${recommendation}. Preserve that exact recommendation.`
+      : `${name} may be mentioned because the governing traveler is eligible.`];
+  }
+  return [
+    `Do not recommend ${kind}. ${name} is not eligible.`,
+    ...(recommendation ? [`${name} recommendation is ${recommendation}. Preserve that exact recommendation.`] : []),
+  ];
+}
+
+function activityFidelityLines(plan) {
+  const walkingRecommendation = knownTravelRecommendation(plan?.activeTravel?.walking);
+  const cyclingRecommendation = knownTravelRecommendation(plan?.activeTravel?.cycling);
+  const childRecommendation = plan?.basis?.childPresent === true
+    ? knownTravelRecommendation({ decision: plan?.decision })
+    : "";
+  if (!walkingRecommendation && !cyclingRecommendation && !childRecommendation) return [];
+  const lines = [];
+  if (childRecommendation) {
+    lines.push(`Children's outdoor play recommendation is ${childRecommendation}. Preserve that exact recommendation.`);
+  }
+  lines.push(
+    "Preserve each activity recommendation exactly.",
+    "Keep children's outdoor play, walking, and cycling separate.",
+    "Do not downgrade a suitable result to caution or avoid.",
+    "Do not describe a caution, avoid, or insufficient_data result as suitable, safe, or equivalent to suitable.",
+    "Do not describe a caution result as fine, okay, acceptable, or equivalent to suitable.",
+    "Do not soften an avoid result or describe it as permitted.",
+    "Do not present insufficient data as a positive safety recommendation.",
+  );
+  if (walkingRecommendation && cyclingRecommendation) {
+    lines.push(`Walking is ${walkingRecommendation} and cycling is ${cyclingRecommendation}. Do not give walking and cycling one shared recommendation unless both deterministic recommendations are the same.`);
+  }
+  return lines;
+}
+
 function childOutdoorClosureLines(plan) {
   if (plan?.basis?.childPresent !== true) return [];
   const recommendation = plan?.decision?.activityRecommendation;
@@ -1432,8 +1726,8 @@ function familySystemPrompt(plan, claims) {
     sensitivity: profile.sensitivity || "general",
   };
   const decision = plan?.decision || { activityRecommendation: "insufficient_data" };
-  const walking = plan?.activeTravel?.walking?.eligible === true;
-  const cycling = plan?.activeTravel?.cycling?.eligible === true;
+  const walking = plan?.activeTravel?.walking;
+  const cycling = plan?.activeTravel?.cycling;
   return [
     buildSystemPrompt(context, decision, claims, familyResolvedPlace(plan)),
     "This request explains a family plan AirSense already calculated.",
@@ -1441,12 +1735,9 @@ function familySystemPrompt(plan, claims) {
     "Do not invent indoor measurements, pollutant values, forecast values, timestamps, or emissions quantities.",
     "Do not invent medical outcomes.",
     "Do not claim an external action was performed.",
-    walking
-      ? "Walking may be mentioned because the governing traveler is eligible."
-      : "Do not recommend walking. Walking is not eligible.",
-    cycling
-      ? "Cycling may be mentioned because the governing traveler is eligible."
-      : "Do not recommend cycling. Cycling is not eligible.",
+    ...travelPromptLines("walking", walking),
+    ...travelPromptLines("cycling", cycling),
+    ...activityFidelityLines(plan),
     "Indoor air has not been measured.",
     "Emissions comments must stay qualitative.",
     "An adult result is not permission for a child.",

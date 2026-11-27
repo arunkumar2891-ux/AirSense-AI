@@ -438,6 +438,255 @@ test("walking and cycling permission follows the governing traveler", () => {
   assert.equal(validateExplanation(lead + "Walking is not recommended under the current decision. Cycling is not offered.", familyContext(child)), null);
 });
 
+function travelHousehold(walkingRecommendation, cyclingRecommendation, householdRecommendation = "suitable") {
+  const eligible = (recommendation) => recommendation === "suitable" || recommendation === "caution";
+  return plan({
+    decision: {
+      activityRecommendation: householdRecommendation,
+      dataFreshness: { state: "fresh" },
+      wind: { state: "included" },
+    },
+    activeTravel: {
+      walking: {
+        eligible: eligible(walkingRecommendation),
+        decision: { activityRecommendation: walkingRecommendation },
+        profile: { ageGroup: "child" },
+      },
+      cycling: {
+        eligible: eligible(cyclingRecommendation),
+        decision: { activityRecommendation: cyclingRecommendation },
+        profile: { ageGroup: "child" },
+      },
+    },
+  });
+}
+
+function activityLead(household) {
+  const word = String(household.decision.activityRecommendation).replaceAll("_", " ");
+  return `The household decision is ${word}. Indoor air quality has not been measured by AirSense AI. `;
+}
+
+test("the family prompt preserves each activity recommendation", async () => {
+  const household = travelHousehold("suitable", "caution");
+  await explainFamilyPlan(household);
+  const prompt = calls[0].config.systemInstruction;
+  assert.match(prompt, /Walking recommendation is suitable\. Preserve that exact recommendation\./);
+  assert.match(prompt, /Cycling recommendation is caution\. Preserve that exact recommendation\./);
+  assert.match(prompt, /Children's outdoor play recommendation is suitable\. Preserve that exact recommendation\./);
+  assert.match(prompt, /Preserve each activity recommendation exactly\./);
+  assert.match(prompt, /Keep children's outdoor play, walking, and cycling separate\./);
+  assert.match(prompt, /Do not downgrade a suitable result to caution or avoid\./);
+  assert.match(prompt, /Do not describe a caution, avoid, or insufficient_data result as suitable, safe, or equivalent to suitable\./);
+  assert.match(prompt, /Do not describe a caution result as fine, okay, acceptable, or equivalent to suitable\./);
+  assert.match(prompt, /Do not soften an avoid result or describe it as permitted\./);
+  assert.match(prompt, /Do not present insufficient data as a positive safety recommendation\./);
+  assert.match(prompt, /Walking is suitable and cycling is caution\. Do not give walking and cycling one shared recommendation unless both deterministic recommendations are the same\./);
+  assert.equal(prompt.includes("Walking may be mentioned because the governing traveler is eligible."), false);
+  assert.equal(prompt.includes("Cycling may be mentioned because the governing traveler is eligible."), false);
+});
+
+test("activity explanations keep the supplied walking and cycling recommendations", () => {
+  const caution = travelHousehold("suitable", "caution");
+  const cautionLead = activityLead(caution);
+  const cautionRejected = [
+    "Active travel options such as walking and cycling are also suitable.",
+    "Walking and cycling are safe.",
+    "Cycling is suitable.",
+    "Cycling is safe.",
+    "Cycling is as suitable as walking.",
+    "A bike ride is equivalent to suitable.",
+    "The cycling recommendation is suitable.",
+  ];
+  for (const line of cautionRejected) {
+    assert.equal(
+      validateExplanation(cautionLead + line, familyContext(caution)),
+      "Explanation misstates a deterministic activity recommendation.",
+      line,
+    );
+  }
+  for (const line of [
+    "Walking is suitable. Cycling is caution.",
+    "Walking is suitable and cycling needs caution.",
+    "The cycling recommendation is caution.",
+    "Cycling is not suitable.",
+    "Cycling is not safe.",
+    "A caution bike ride is not the same as suitable walking.",
+  ]) {
+    assert.equal(validateExplanation(cautionLead + line, familyContext(caution)), null, line);
+  }
+
+  const cyclingAvoid = travelHousehold("suitable", "avoid");
+  const avoidLead = activityLead(cyclingAvoid);
+  for (const line of [
+    "Walking and cycling are suitable.",
+    "Cycling is safe.",
+    "Walking is suitable and cycling is suitable.",
+  ]) {
+    assert.match(validateExplanation(avoidLead + line, familyContext(cyclingAvoid)), /cycling|deterministic activity recommendation/i, line);
+  }
+  assert.equal(
+    validateExplanation(avoidLead + "Walking is suitable. Cycling is not offered.", familyContext(cyclingAvoid)),
+    null,
+  );
+
+  const bothSuitable = travelHousehold("suitable", "suitable");
+  const suitableLead = activityLead(bothSuitable);
+  for (const line of [
+    "Walking and cycling are suitable.",
+    "Walking is suitable. Cycling is suitable.",
+    "Active travel options such as walking and cycling are also suitable.",
+  ]) {
+    assert.equal(validateExplanation(suitableLead + line, familyContext(bothSuitable)), null, line);
+  }
+
+  const bothAvoid = travelHousehold("avoid", "avoid", "avoid");
+  for (const line of [
+    "Walking and cycling are suitable.",
+    "Walking is safe.",
+    "Cycling is safe.",
+    "Active travel options such as walking and cycling are also suitable.",
+  ]) {
+    assert.match(validateExplanation(lead + line, familyContext(bothAvoid)), /not eligible|deterministic activity recommendation/i, line);
+  }
+  for (const line of [
+    "Walking and cycling are not offered.",
+    "Walking is not recommended. Cycling is not offered.",
+  ]) {
+    assert.equal(validateExplanation(lead + line, familyContext(bothAvoid)), null, line);
+  }
+});
+
+test("activity recommendations are preserved in both directions", () => {
+  const mismatch = "Explanation misstates a deterministic activity recommendation.";
+  const mixed = travelHousehold("suitable", "caution");
+  const mixedLead = activityLead(mixed);
+  for (const line of [
+    "Walking remains suitable while cycling calls for caution.",
+    "Cycling needs caution rather than being treated as suitable.",
+    "Children's outdoor play is suitable. Walking is suitable. Cycling needs caution.",
+    "A caution bike ride is not the same as suitable walking.",
+    "Cycling is caution. Walking is fine.",
+    "Walking is safe. Cycling is not suitable.",
+    "Indoor air quality has not been measured by AirSense AI. Emissions comments stay qualitative.",
+    "A child profile governs outdoor play, and an adult result is not permission for that child.",
+  ]) {
+    assert.equal(validateExplanation(mixedLead + line, familyContext(mixed)), null, line);
+  }
+  assert.equal(validateExplanation(familyRulesExplanation(mixed), familyContext(mixed)), null);
+  for (const line of [
+    "Cycling is suitable.",
+    "Cycling is fine.",
+    "Cycling is okay.",
+    "A bike ride is acceptable.",
+    "Walking is caution.",
+    "Walking is avoid.",
+    "Walking and cycling are suitable.",
+    "Cycling and walking are safe.",
+    "Active travel options such as walking and cycling are also suitable.",
+  ]) {
+    assert.equal(validateExplanation(mixedLead + line, familyContext(mixed)), mismatch, line);
+  }
+
+  const bothSuitable = travelHousehold("suitable", "suitable");
+  const suitableLead = activityLead(bothSuitable);
+  for (const line of [
+    "Cycling is caution.",
+    "Walking is avoid.",
+    "Outdoor play is caution.",
+    "Children should stay indoors.",
+    "Children's outdoor play is avoid.",
+  ]) {
+    assert.equal(validateExplanation(suitableLead + line, familyContext(bothSuitable)), mismatch, line);
+  }
+  for (const line of [
+    "Walking and cycling are suitable.",
+    "Children's outdoor play is suitable, and both walking and cycling are fine.",
+    "It is a good time for the kids to play outside. Walking is safe. Cycling is acceptable.",
+  ]) {
+    assert.equal(validateExplanation(suitableLead + line, familyContext(bothSuitable)), null, line);
+  }
+
+  const cautionWalk = travelHousehold("caution", "suitable", "caution");
+  const cautionLead = activityLead(cautionWalk);
+  for (const line of [
+    "Walking is fine.",
+    "Walking is safe.",
+    "Walking and cycling are suitable.",
+    "Outdoor play is suitable.",
+    "It is a good time for the kids to play outside.",
+  ]) {
+    assert.equal(validateExplanation(cautionLead + line, familyContext(cautionWalk)), mismatch, line);
+  }
+  assert.equal(
+    validateExplanation(cautionLead + "Children's outdoor play needs caution. Walking needs caution. Cycling is suitable.", familyContext(cautionWalk)),
+    null,
+  );
+
+  const cyclingAvoid = travelHousehold("suitable", "avoid");
+  const avoidTravelLead = activityLead(cyclingAvoid);
+  assert.equal(validateExplanation(avoidTravelLead + "Cycling is caution.", familyContext(cyclingAvoid)), mismatch);
+  assert.equal(validateExplanation(avoidTravelLead + "Walking is caution.", familyContext(cyclingAvoid)), mismatch);
+  for (const line of ["Cycling is fine.", "You can cycle today.", "Cycling is safe."]) {
+    assert.match(validateExplanation(avoidTravelLead + line, familyContext(cyclingAvoid)), /not eligible|deterministic activity recommendation/i, line);
+  }
+  assert.equal(
+    validateExplanation(avoidTravelLead + "Walking is suitable. Cycling is avoid and is not permitted.", familyContext(cyclingAvoid)),
+    null,
+  );
+
+  const insufficient = travelHousehold("insufficient_data", "avoid", "insufficient_data");
+  const insufficientLead = activityLead(insufficient);
+  for (const line of [
+    "Walking is suitable.",
+    "Walking is fine.",
+    "Walking is caution.",
+    "Children's outdoor play is safe.",
+    "Outdoor play is suitable.",
+  ]) {
+    assert.ok(validateExplanation(insufficientLead + line, familyContext(insufficient)), line);
+  }
+  for (const line of [
+    "There is insufficient data for walking. Cycling is not offered.",
+    "Outdoor play is not recommended because the data cannot support it.",
+    "Children should stay indoors. Walking is not offered.",
+  ]) {
+    assert.equal(validateExplanation(insufficientLead + line, familyContext(insufficient)), null, line);
+  }
+});
+
+test("a caution activity called suitable falls back to the deterministic explanation", async () => {
+  const household = travelHousehold("suitable", "caution");
+  behavior = {
+    type: "text",
+    body: modelBody(
+      "The household decision is suitable. Active travel options such as walking and cycling are also suitable. Indoor air quality has not been measured by AirSense AI. Emissions comments stay qualitative.",
+      "suitable",
+    ),
+  };
+  const result = await explainFamilyPlan(household);
+  assert.equal(result.mode, "rules-fallback");
+  assert.equal(result.text, familyRulesExplanation(household));
+  assert.equal(household.decision.activityRecommendation, "suitable");
+  assert.equal(household.activeTravel.walking.decision.activityRecommendation, "suitable");
+  assert.equal(household.activeTravel.cycling.decision.activityRecommendation, "caution");
+  assert.equal(household.schedule.status, "no_suitable_window");
+
+  const suitable = travelHousehold("suitable", "suitable");
+  behavior = {
+    type: "text",
+    body: modelBody(
+      "The household decision is suitable. Cycling is caution. Walking is suitable. Indoor air quality has not been measured by AirSense AI.",
+      "suitable",
+    ),
+  };
+  const downgraded = await explainFamilyPlan(suitable);
+  assert.equal(downgraded.mode, "rules-fallback");
+  assert.equal(downgraded.text, familyRulesExplanation(suitable));
+  assert.equal(suitable.decision.activityRecommendation, "suitable");
+  assert.equal(suitable.activeTravel.cycling.decision.activityRecommendation, "suitable");
+  assert.equal(suitable.schedule.status, "no_suitable_window");
+});
+
 test("indoor measurement claims are rejected and limitation statements are kept", () => {
   const household = plan();
   for (const line of [
