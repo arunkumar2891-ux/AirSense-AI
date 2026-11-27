@@ -1078,8 +1078,101 @@ function safeClaimReason(error) {
   return SAFE_CLAIM_REASONS.has(message) ? message : undefined;
 }
 
+const CONFIGURED_RESPONSE_MIME_TYPE = "application/json";
+const FINISH_REASONS = new Set([
+  "FINISH_REASON_UNSPECIFIED",
+  "STOP",
+  "MAX_TOKENS",
+  "SAFETY",
+  "RECITATION",
+  "LANGUAGE",
+  "OTHER",
+  "BLOCKLIST",
+  "PROHIBITED_CONTENT",
+  "SPII",
+  "MALFORMED_FUNCTION_CALL",
+  "IMAGE_SAFETY",
+  "IMAGE_PROHIBITED_CONTENT",
+  "IMAGE_OTHER",
+  "NO_IMAGE",
+  "IMAGE_RECITATION",
+  "UNEXPECTED_TOOL_CALL",
+  "TOO_MANY_TOOL_CALLS",
+  "MISSING_THOUGHT_SIGNATURE",
+  "MALFORMED_RESPONSE",
+  "ESCALATION",
+  "PUP_LIMITED_DISABLED",
+  "CONTINUATION",
+  "MODEL_ARMOR",
+]);
+const BLOCKED_FINISH_REASONS = new Set([
+  "SAFETY",
+  "RECITATION",
+  "LANGUAGE",
+  "BLOCKLIST",
+  "PROHIBITED_CONTENT",
+  "SPII",
+  "IMAGE_SAFETY",
+  "IMAGE_PROHIBITED_CONTENT",
+  "IMAGE_RECITATION",
+  "ESCALATION",
+  "PUP_LIMITED_DISABLED",
+  "MODEL_ARMOR",
+]);
+const INCOMPLETE_FINISH_REASONS = new Set([
+  "MAX_TOKENS",
+  "CONTINUATION",
+  "MALFORMED_RESPONSE",
+  "FINISH_REASON_UNSPECIFIED",
+]);
+const PROMPT_BLOCK_REASONS = new Set([
+  "BLOCKED_REASON_UNSPECIFIED",
+  "SAFETY",
+  "OTHER",
+  "BLOCKLIST",
+  "PROHIBITED_CONTENT",
+  "IMAGE_SAFETY",
+]);
+
+function boundedCount(value, max) {
+  if (!Number.isInteger(value) || value < 0) return 0;
+  return Math.min(value, max);
+}
+
+function responseDiagnostics(response) {
+  const text = typeof response?.text === "string" ? response.text : "";
+  const candidates = Array.isArray(response?.candidates) ? response.candidates : [];
+  const first = candidates[0];
+  const parts = Array.isArray(first?.content?.parts) ? first.content.parts : [];
+  const finishReason = typeof first?.finishReason === "string" && FINISH_REASONS.has(first.finishReason)
+    ? first.finishReason
+    : undefined;
+  const promptBlocked = typeof response?.promptFeedback?.blockReason === "string"
+    && PROMPT_BLOCK_REASONS.has(response.promptFeedback.blockReason);
+  return {
+    responseMimeType: CONFIGURED_RESPONSE_MIME_TYPE,
+    textPresent: text.length > 0,
+    textLength: text.length,
+    candidateCount: candidates.length,
+    ...(finishReason ? { finishReason } : {}),
+    partCount: parts.length,
+    blocked: promptBlocked || (finishReason ? BLOCKED_FINISH_REASONS.has(finishReason) : false),
+    incomplete: finishReason ? INCOMPLETE_FINISH_REASONS.has(finishReason) : false,
+  };
+}
+
 function logAI(event) {
-  const { model, latencyMs, success, mode, attempt, errorType, reason } = event;
+  const { model, latencyMs, success, mode, attempt, errorType, reason, diagnostics } = event;
+  const safeDiagnostics = diagnostics ? {
+    responseMimeType: CONFIGURED_RESPONSE_MIME_TYPE,
+    textPresent: diagnostics.textPresent === true,
+    textLength: boundedCount(diagnostics.textLength, 1_000_000),
+    candidateCount: boundedCount(diagnostics.candidateCount, 32),
+    ...(FINISH_REASONS.has(diagnostics.finishReason) ? { finishReason: diagnostics.finishReason } : {}),
+    partCount: boundedCount(diagnostics.partCount, 64),
+    blocked: diagnostics.blocked === true,
+    incomplete: diagnostics.incomplete === true,
+  } : null;
   console.log(JSON.stringify({
     ts: new Date().toISOString(),
     service: "airsense-ai",
@@ -1091,6 +1184,7 @@ function logAI(event) {
     attempt,
     ...(errorType ? { errorType } : {}),
     ...(reason ? { reason } : {}),
+    ...(safeDiagnostics ? { diagnostics: safeDiagnostics } : {}),
   }));
 }
 
@@ -1346,14 +1440,15 @@ export async function explainFamilyPlan(plan) {
   const deadlineAt = Date.now() + AI_CONFIG.timeoutMs;
   const start = Date.now();
   const controller = new AbortController();
+  let response;
   try {
-    const response = await runWithDeadline(
+    response = await runWithDeadline(
       () => getClient().models.generateContent({
         model: AI_CONFIG.model,
         contents: [{ role: "user", parts: [{ text: serialized }] }],
         config: {
           systemInstruction: familySystemPrompt(plan, claims),
-          responseMimeType: "application/json",
+          responseMimeType: CONFIGURED_RESPONSE_MIME_TYPE,
           responseSchema: RESPONSE_SCHEMA,
           temperature: 0.25,
           maxOutputTokens: AI_CONFIG.maxOutputTokens,
@@ -1380,6 +1475,7 @@ export async function explainFamilyPlan(plan) {
       attempt: 0,
       errorType: error?.name || "Error",
       reason: safeClaimReason(error),
+      ...(response ? { diagnostics: responseDiagnostics(response) } : {}),
     });
     return { mode: "rules-fallback", text };
   }
@@ -1443,7 +1539,7 @@ export async function askGemini(question, context, trusted, decision = null, opt
           contents: [{ role: "user", parts: [{ text: userPrompt }] }],
           config: {
             systemInstruction: system,
-            responseMimeType: "application/json",
+            responseMimeType: CONFIGURED_RESPONSE_MIME_TYPE,
             responseSchema: RESPONSE_SCHEMA,
             temperature: 0.25,
             maxOutputTokens: AI_CONFIG.maxOutputTokens,
@@ -1470,6 +1566,7 @@ export async function askGemini(question, context, trusted, decision = null, opt
           mode: mismatch ? "rules-safety-fallback" : "rules-fallback",
           attempt,
           errorType: err?.name || "ClaimValidation",
+          diagnostics: responseDiagnostics(response),
         });
         return {
           answer: scopedAnswer,

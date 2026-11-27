@@ -17,6 +17,7 @@ class FakeModels {
       throw error;
     }
     if (behavior.type === "malformed") return { text: "not json at all" };
+    if (behavior.type === "diagnostics") return behavior.response;
     if (behavior.type === "text") return { text: JSON.stringify(behavior.body) };
     return { text: JSON.stringify(behavior.body) };
   }
@@ -145,6 +146,59 @@ test("timeout, provider errors, and malformed output keep the deterministic expl
   assert.equal(malformed.mode, "rules-fallback");
   assert.equal(malformed.text, expected);
   assert.equal(household.decision.activityRecommendation, "avoid");
+});
+
+test("a non-JSON family response logs response metadata without model text", async () => {
+  const household = plan();
+  const modelText = "Here is the plan: children can play outside near the park.";
+  behavior = {
+    type: "diagnostics",
+    response: {
+      text: modelText,
+      promptFeedback: { blockReasonMessage: "hidden provider message", blockReason: "SAFETY" },
+      candidates: [{
+        finishReason: "MAX_TOKENS",
+        content: {
+          parts: [
+            { thought: true, text: "private thought about the household" },
+            { text: modelText },
+          ],
+        },
+      }],
+    },
+  };
+  const logs = [];
+  const originalLog = console.log;
+  console.log = (...args) => logs.push(args.join(" "));
+  try {
+    const result = await explainFamilyPlan(household);
+    assert.equal(result.mode, "rules-fallback");
+    assert.equal(result.text, familyRulesExplanation(household));
+    assert.equal(household.decision.activityRecommendation, "avoid");
+    assert.equal(household.schedule.status, "no_suitable_window");
+  } finally {
+    console.log = originalLog;
+  }
+  const entry = logs.map((line) => JSON.parse(line)).find((item) => item.errorType === "ClaimValidation");
+  assert.equal(entry.reason, "Model returned non-JSON output");
+  assert.equal(entry.model, AI_CONFIG.model);
+  assert.deepEqual(entry.diagnostics, {
+    responseMimeType: "application/json",
+    textPresent: true,
+    textLength: modelText.length,
+    candidateCount: 1,
+    finishReason: "MAX_TOKENS",
+    partCount: 2,
+    blocked: true,
+    incomplete: true,
+  });
+  const logged = JSON.stringify(entry);
+  assert.equal(logged.includes(modelText), false);
+  assert.equal(logged.includes("private thought"), false);
+  assert.equal(logged.includes("hidden provider message"), false);
+  assert.equal(logged.includes("13.0827"), false);
+  assert.equal(calls[0].config.responseMimeType, "application/json");
+  assert.ok(calls[0].config.responseSchema);
 });
 
 test("contradictory, child, emissions, indoor, and medical explanations are discarded", async () => {
