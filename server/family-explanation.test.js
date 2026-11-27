@@ -105,6 +105,39 @@ function assertStructuredExplanationConfig(config) {
   assert.equal(config.temperature, 0.25);
 }
 
+test("a child avoid or insufficient-data prompt keeps outdoor play closed", async () => {
+  const avoid = plan({
+    activeTravel: { walking: { eligible: true }, cycling: { eligible: false } },
+  });
+  await explainFamilyPlan(avoid);
+  const avoidPrompt = calls[0].config.systemInstruction;
+  assert.match(avoidPrompt, /The child household decision is avoid\. Say that children should stay indoors, postpone outdoor play, or move play indoors\./);
+  assert.match(avoidPrompt, /Adult eligibility never grants permission for a child\./);
+  assert.match(avoidPrompt, /Do not describe outdoor play as suitable, safe, acceptable, a good time, or permitted\./);
+  assert.match(avoidPrompt, /Walking may be mentioned because the governing traveler is eligible\./);
+  assert.match(avoidPrompt, /Do not recommend cycling\. Cycling is not eligible\./);
+  assert.match(avoidPrompt, /Indoor air has not been measured\./);
+  assert.match(avoidPrompt, /Emissions comments must stay qualitative\./);
+  assertStructuredExplanationConfig(calls[0].config);
+
+  calls = [];
+  const insufficient = plan({
+    decision: { activityRecommendation: "insufficient_data", dataFreshness: { state: "stale" }, wind: { state: "included" } },
+    activeTravel: { walking: { eligible: false }, cycling: { eligible: true } },
+  });
+  await explainFamilyPlan(insufficient);
+  const insufficientPrompt = calls[0].config.systemInstruction;
+  assert.match(insufficientPrompt, /The child household decision is insufficient_data\. Do not recommend outdoor activity because the data cannot support a safe recommendation\./);
+  assert.match(insufficientPrompt, /Adult eligibility never grants permission for a child\./);
+  assert.match(insufficientPrompt, /Do not describe outdoor play as suitable, safe, acceptable, a good time, or permitted\./);
+  assert.match(insufficientPrompt, /Do not recommend walking\. Walking is not eligible\./);
+  assert.match(insufficientPrompt, /Cycling may be mentioned because the governing traveler is eligible\./);
+  assert.match(insufficientPrompt, /Indoor air has not been measured\./);
+  assert.match(insufficientPrompt, /Emissions comments must stay qualitative\./);
+  assert.equal(insufficientPrompt.includes("children should stay indoors"), false);
+  assertStructuredExplanationConfig(calls[0].config);
+});
+
 test("a configured model can explain the deterministic family plan", async () => {
   const household = plan();
   const result = await explainFamilyPlan(household);

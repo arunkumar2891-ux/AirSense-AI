@@ -1411,6 +1411,19 @@ function familyEvidence(plan, claims) {
   };
 }
 
+function childOutdoorClosureLines(plan) {
+  if (plan?.basis?.childPresent !== true) return [];
+  const recommendation = plan?.decision?.activityRecommendation;
+  if (recommendation !== "avoid" && recommendation !== "insufficient_data") return [];
+  return [
+    "Adult eligibility never grants permission for a child.",
+    recommendation === "avoid"
+      ? "The child household decision is avoid. Say that children should stay indoors, postpone outdoor play, or move play indoors."
+      : "The child household decision is insufficient_data. Do not recommend outdoor activity because the data cannot support a safe recommendation.",
+    "Do not describe outdoor play as suitable, safe, acceptable, a good time, or permitted.",
+  ];
+}
+
 function familySystemPrompt(plan, claims) {
   const profile = plan?.governingProfile || {};
   const context = {
@@ -1437,6 +1450,7 @@ function familySystemPrompt(plan, claims) {
     "Indoor air has not been measured.",
     "Emissions comments must stay qualitative.",
     "An adult result is not permission for a child.",
+    ...childOutdoorClosureLines(plan),
     "Write one concise, friendly explanation for a family.",
   ].join("\n");
 }
