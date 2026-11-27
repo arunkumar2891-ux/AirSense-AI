@@ -1,0 +1,319 @@
+<template>
+  <style>
+    #root {
+      position: absolute;
+      inset: 0;
+      background: transparent;
+      font-family: var(--font-display, Inter, sans-serif);
+      color: #101722;
+    }
+    #gw-top-clip {
+      position: absolute;
+      left: 96px;
+      top: 292px;
+      width: 888px;
+    }
+    .gw-kicker {
+      font-family: "JetBrains Mono", monospace;
+      font-size: 28px;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      color: #174ea6;
+    }
+    .gw-title {
+      margin-top: 8px;
+      font-size: 58px;
+      font-weight: 800;
+      line-height: 1.08;
+      letter-spacing: -0.035em;
+      color: #101722;
+    }
+    #gw-controls {
+      margin-top: 28px;
+      position: relative;
+      background: #ffffff;
+      border: 2px solid #dfe4ec;
+      border-radius: 24px;
+      padding: 26px 30px;
+      box-shadow: 0 14px 36px rgba(16, 23, 34, 0.06);
+    }
+    .chip-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+    .profile-chip {
+      padding: 10px 18px;
+      border-radius: 12px;
+      background: #f8fafc;
+      border: 1.5px solid #c7cfda;
+      font-size: 28px;
+      font-weight: 700;
+      color: #101722;
+    }
+    #gw-btn-wrap {
+      margin-top: 20px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 20px;
+    }
+    #gw-btn {
+      padding: 16px 30px;
+      border-radius: 14px;
+      background: #1d4ed8;
+      color: #ffffff;
+      font-size: 32px;
+      font-weight: 800;
+      letter-spacing: -0.01em;
+      transform-origin: 50% 50%;
+    }
+    .gw-note {
+      font-family: "JetBrains Mono", monospace;
+      font-size: 28px;
+      font-weight: 600;
+      color: #3f4b5d;
+    }
+    #gw-cursor {
+      position: absolute;
+      left: 340px;
+      top: 132px;
+      width: 52px;
+      height: 52px;
+      pointer-events: none;
+      z-index: 6;
+    }
+    #gw-timeline-clip {
+      position: absolute;
+      left: 96px;
+      top: 720px;
+      width: 888px;
+    }
+    #gw-timeline {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 16px;
+    }
+    .hour-slot {
+      background: #ffffff;
+      border: 2px solid #dfe4ec;
+      border-top: 7px solid #f59e0b;
+      border-radius: 20px;
+      padding: 20px 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .hour-slot.good {
+      background: #e8f0ff;
+      border-color: #2563eb;
+      border-top: 7px solid #2563eb;
+    }
+    .slot-clock {
+      font-family: "JetBrains Mono", monospace;
+      font-size: 28px;
+      font-weight: 700;
+      color: #3f4b5d;
+    }
+    .hour-slot.good .slot-clock {
+      color: #174ea6;
+    }
+    .slot-val {
+      font-size: 46px;
+      font-weight: 800;
+      line-height: 1.05;
+      letter-spacing: -0.03em;
+      color: #101722;
+    }
+    .hour-slot.good .slot-val {
+      color: #174ea6;
+    }
+    .slot-cat {
+      font-size: 28px;
+      font-weight: 700;
+      color: #9a3412;
+    }
+    .hour-slot.good .slot-cat {
+      color: #174ea6;
+    }
+    #gw-best-clip {
+      position: absolute;
+      left: 96px;
+      top: 964px;
+      width: 888px;
+    }
+    #gw-best {
+      background: #ffffff;
+      border: 3px solid #2563eb;
+      border-radius: 28px;
+      padding: 32px 36px 34px;
+      box-shadow: 0 22px 50px rgba(37, 99, 235, 0.12);
+    }
+    .best-badges {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+    }
+    .rank-best {
+      padding: 8px 16px;
+      border-radius: 10px;
+      background: #fff5dc;
+      border: 1.5px solid #f59e0b;
+      font-family: "JetBrains Mono", monospace;
+      font-size: 28px;
+      font-weight: 800;
+      color: #9a3412;
+    }
+    .aqi-good-pill {
+      padding: 8px 18px;
+      border-radius: 10px;
+      background: #e8f0ff;
+      border: 1.5px solid #2563eb;
+      font-family: "JetBrains Mono", monospace;
+      font-size: 28px;
+      font-weight: 800;
+      color: #174ea6;
+    }
+    .best-window-time {
+      margin-top: 20px;
+      font-size: 58px;
+      font-weight: 800;
+      letter-spacing: -0.035em;
+      line-height: 1.08;
+      color: #101722;
+    }
+    .best-metrics {
+      margin-top: 12px;
+      font-size: 30px;
+      font-weight: 600;
+      color: #3f4b5d;
+    }
+    .best-rule {
+      margin-top: 20px;
+      padding-top: 18px;
+      border-top: 2px solid #e5eaf0;
+      font-size: 29px;
+      font-weight: 700;
+      color: #174ea6;
+    }
+  </style>
+  <div id="root" data-composition-id="gowindow" data-width="1080" data-height="1920" data-layout-allow-safe-zone>
+    <div id="gw-top-clip" class="clip" data-start="0" data-duration="7.07" data-track-index="1">
+      <div id="gw-header">
+        <div class="gw-kicker">FORECAST PLANNING · NEXT 12 HOURS</div>
+        <h2 class="gw-title">GoWindow finds a clean slot.</h2>
+      </div>
+      <div id="gw-controls">
+        <div class="chip-row">
+          <span class="profile-chip">Running</span>
+          <span class="profile-chip">Adult</span>
+          <span class="profile-chip">45 minutes</span>
+          <span class="profile-chip">Daytime</span>
+        </div>
+        <div id="gw-btn-wrap">
+          <div id="gw-btn">Find my best time</div>
+          <span class="gw-note">SAMPLE FORECAST</span>
+        </div>
+        <div id="gw-cursor" data-layout-ignore>
+          <svg width="52" height="52" viewBox="0 0 32 32" fill="none">
+            <path d="M7 4L25 15.5L16.2 17.6L11.5 26L7 4Z" fill="#101722" stroke="#ffffff" stroke-width="2.5" stroke-linejoin="round" />
+          </svg>
+        </div>
+      </div>
+    </div>
+
+    <div id="gw-timeline-clip" class="clip" data-start="1.45" data-duration="5.62" data-track-index="2">
+      <div id="gw-timeline">
+        <div id="slot-1" class="hour-slot">
+          <span class="slot-clock">10 AM</span>
+          <span class="slot-val">82</span>
+          <span class="slot-cat">Moderate</span>
+        </div>
+        <div id="slot-2" class="hour-slot">
+          <span class="slot-clock">1 PM</span>
+          <span class="slot-val">52</span>
+          <span class="slot-cat">Moderate</span>
+        </div>
+        <div id="slot-3" class="hour-slot good">
+          <span class="slot-clock">4 PM</span>
+          <span class="slot-val">39</span>
+          <span class="slot-cat">Good</span>
+        </div>
+        <div id="slot-4" class="hour-slot">
+          <span class="slot-clock">7 PM</span>
+          <span class="slot-val">68</span>
+          <span class="slot-cat">Moderate</span>
+        </div>
+      </div>
+    </div>
+
+    <div id="gw-best-clip" class="clip" data-start="4.2" data-duration="2.87" data-track-index="3">
+      <div id="gw-best">
+        <div class="best-badges">
+          <span class="rank-best">Best forecast window</span>
+          <span class="aqi-good-pill">US AQI 39 · Good</span>
+        </div>
+        <div class="best-window-time">4:00 PM – 4:45 PM</div>
+        <div class="best-metrics">PM2.5 9.8 µg/m³ · Low · Suitable forecast</div>
+        <div class="best-rule">Now stays Avoid. Later stays separate.</div>
+      </div>
+    </div>
+  </div>
+  <script>
+    const tl = gsap.timeline({ paused: true });
+
+    // Scene offset = 4.39s in main composition
+    tl.fromTo(
+      "#gw-header",
+      { opacity: 0, y: 24 },
+      { opacity: 1, y: 0, duration: 0.34, ease: "expo.out" },
+      0.04
+    );
+    tl.fromTo(
+      "#gw-controls",
+      { opacity: 0, y: 28 },
+      { opacity: 1, y: 0, duration: 0.36, ease: "expo.out" },
+      0.12
+    );
+
+    // Simulated cursor glides to "Find my best time" and clicks at 0.95s local = 5.34s global
+    tl.fromTo(
+      "#gw-cursor",
+      { opacity: 0, x: 220, y: 70, scale: 1 },
+      { opacity: 1, x: -110, y: 4, duration: 0.52, ease: "power3.out" },
+      0.38
+    );
+    tl.to("#gw-cursor", { scale: 0.86, duration: 0.08, ease: "power2.in" }, 0.95);
+    tl.fromTo(
+      "#gw-btn",
+      { scale: 1, backgroundColor: "#1d4ed8" },
+      { scale: 0.96, backgroundColor: "#174ea6", duration: 0.09, ease: "power2.in" },
+      0.95
+    );
+    tl.to("#gw-btn", { scale: 1, backgroundColor: "#2563eb", duration: 0.18, ease: "back.out(1.4)" }, 1.04);
+    tl.to("#gw-cursor", { scale: 1, opacity: 0, duration: 0.24, ease: "power2.out" }, 1.08);
+
+    // beat-grid: slot 1 at 6.00s (1.61s), slot 2 at 6.56s (2.17s), slot 3 at 7.09s (2.70s), slot 4 at 7.64s (3.25s)
+    tl.fromTo("#slot-1", { opacity: 0, y: 22 }, { opacity: 1, y: 0, duration: 0.28, ease: "expo.out" }, 1.61);
+    tl.fromTo("#slot-2", { opacity: 0, y: 22 }, { opacity: 1, y: 0, duration: 0.28, ease: "expo.out" }, 2.17);
+    tl.fromTo("#slot-3", { opacity: 0, y: 22, scale: 0.96 }, { opacity: 1, y: 0, scale: 1, duration: 0.32, ease: "expo.out" }, 2.70);
+    tl.fromTo("#slot-4", { opacity: 0, y: 22 }, { opacity: 1, y: 0, duration: 0.28, ease: "expo.out" }, 3.25);
+
+    // beat-locked: 8.74s global (4.35s local)
+    tl.fromTo(
+      "#gw-best",
+      { opacity: 0, y: 36, scale: 0.97 },
+      { opacity: 1, y: 0, scale: 1, duration: 0.38, ease: "expo.out" },
+      4.35
+    );
+
+    // Clean exit before 7.07s seam (11.46s global)
+    tl.to("#gw-header", { opacity: 0, y: -16, duration: 0.18, ease: "power2.in" }, 6.84);
+    tl.to("#gw-controls", { opacity: 0, y: -18, duration: 0.18, ease: "power2.in" }, 6.84);
+    tl.to("#gw-timeline", { opacity: 0, y: -20, duration: 0.18, ease: "power2.in" }, 6.86);
+    tl.to("#gw-best", { opacity: 0, y: -24, duration: 0.18, ease: "power2.in" }, 6.86);
+
+    window.__timelines["gowindow"] = tl;
+  </script>
+</template>

@@ -1,0 +1,1 @@
+One AQI number doesn't tell you whether a 45-minute run or kids' outdoor play makes sense right now or later today. Built AirSense AI: deterministic US AQI exposure rules, 12-hour GoWindow scheduling, and child-aware family air plans where AI explains the result—never overrides the safety engine.
