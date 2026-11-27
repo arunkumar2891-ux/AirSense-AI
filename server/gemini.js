@@ -1,6 +1,7 @@
 import { GoogleGenAI } from "@google/genai";
 import { buildExplanationClaims, getAQIStatus, getPM25Status } from "./logic.js";
 import { extractLocationIntent, placeNamesMatch } from "./locations.js";
+import { familyRulesExplanation } from "./family-guidance.js";
 
 // ---------- Configuration ----------
 const configuredTimeoutMs = Number(process.env.AI_TIMEOUT_MS);
@@ -464,12 +465,279 @@ function foreignPlaceMention(text, place, question) {
   return "";
 }
 
-export function validateExplanation(explanation, { air, decision, hypothetical, place, question } = {}) {
+// Clause-level checks for a family explanation. They are pattern matching over
+// normalized text, not a second model judgment, and they do not provide
+// complete semantic protection. A prohibited activity is rejected when a
+// separated part grants it. A denial keeps a part only when that part does not
+// leave a later unnegated grant behind. Child outdoor play is also rejected
+// when the sentence describes an outing, or when children and an outdoor
+// activity co-occur without a restriction and without a rule frame such as
+// "follows the child profile". There is no server-resolved city on a normal
+// family request: reverse geocoding stays on the client, and only
+// resolvedPlace, location.name, or locationName already on the trusted plan
+// is accepted. Other known cities stay rejected.
+function familyClauses(text) {
+  return String(text || "")
+    .split(/(?<=[.!?])\s+/)
+    .map((clause) => clause.trim())
+    .filter(Boolean);
+}
+
+const POLARITY_SPLIT = /\s*(?:[;:]|(?:,\s*)?\b(?:even though|even if|although|though|however|yet|whereas|despite|but|and|so)\b|,)\s*/i;
+
+function polarityParts(clause) {
+  return String(clause || "")
+    .split(POLARITY_SPLIT)
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
+function clauseWithholds(clause) {
+  return /\b(?:do not|don't|dont|never|cannot|can't|cant|should not|shouldn't|must not|mustn't|not recommended|not advised|not offered|not eligible|not permitted|no permission|isn't|is not|aren't|are not|was not|stay inside|indoors|keep(?:\s+\w+){0,3}\s+indoors|move(?:d)? indoors|remain indoors|reschedul(?:e|ed|ing)|postpon(?:e|ed|ing)|withhold|avoid going|avoid outdoor)\b/i.test(clause);
+}
+
+function partGrants(part, detect) {
+  if (!detect(part)) return false;
+  if (!clauseWithholds(part)) return true;
+  const tails = part.split(/\b(?:cannot|can't|cant|without|never|n't|not|no)\b/i).slice(1);
+  return tails.some((tail) => detect(tail) && !clauseWithholds(tail));
+}
+
+function grantUnlessWithheld(clause, detect) {
+  return polarityParts(clause).some((part) => partGrants(part, detect));
+}
+
+function grantsChildOutdoor(clause) {
+  const inheritChild = /\b(?:child|children|kids|kid)\b/i.test(clause);
+  return grantUnlessWithheld(clause, (part) => childOutdoorPermission(part, inheritChild));
+}
+
+function isChildOutingDescription(clause) {
+  return /\b(?:head|heads|heading|goes|going|went|visit|visits|visiting|happen|happens|happening|play session|this afternoon|tonight|set out|leave for|planned)\b/i.test(clause)
+    || /\b(?:to|at|in) the park\b/i.test(clause)
+    || /\b(?:go|going|gone)\s+(?:to|out|outside)\b/i.test(clause);
+}
+
+function isChildRuleFrame(clause) {
+  return /\b(?:follow|follows|following|govern|governs|governing|profile)\b/i.test(clause);
+}
+
+function mentionsChildOutdoorActivity(clause) {
+  if (/\b(?:park|playground|fresh air|play session)\b/i.test(clause)) return true;
+  if (/\boutdoor play\b|\bplay(?:ing)? outdoors?\b|\bplay(?:ing)? outside\b/i.test(clause)) return true;
+  if (/\b(?:play|playing)\b/i.test(clause) && /\b(?:outdoor|outdoors|outside)\b/i.test(clause)) return true;
+  if (/\b(?:outside|outdoors)\b/i.test(clause) && isChildOutingDescription(clause)) return true;
+  return false;
+}
+
+function describesChildOuting(clause, inheritChild) {
+  const people = /\b(?:child|children|kids|kid)\b/i.test(clause)
+    || (inheritChild && /\b(?:they|them|their)\b/i.test(clause));
+  if (!people || !mentionsChildOutdoorActivity(clause)) return false;
+  if (isChildOutingDescription(clause)) return true;
+  if (isChildRuleFrame(clause)) return false;
+  return true;
+}
+
+function childOutdoorPermission(clause, inheritChild = false) {
+  if (describesChildOuting(clause, inheritChild)) return true;
+  const people = /\b(?:child|children|kids|kid|family|everyone|household)\b/i.test(clause)
+    || (inheritChild && /\b(?:they|them|their)\b/i.test(clause));
+  const outdoors = /\b(?:outdoor|outdoors|outside|park|fresh air)\b/i.test(clause);
+  const play = /\b(?:play|playing)\b/i.test(clause);
+  const modal = /\b(?:can|may|could|should)\b/i.test(clause);
+  const approval = /\b(?:fine|acceptable|safe|okay|ok|suitable|recommended|allowed|good time|great time)\b/i.test(clause);
+  if (/\bgood time\b/i.test(clause) && (people || play || outdoors)) return true;
+  if (/\boutdoor play\b/i.test(clause) && (approval || modal)) return true;
+  if (play && outdoors && (modal || approval)) return true;
+  if (/\bfresh air\b/i.test(clause) && outdoors && (modal || /\benjoy\b/i.test(clause))) return true;
+  if (/\bspend time\b/i.test(clause) && outdoors && (modal || people)) return true;
+  if (people && outdoors && (modal || approval)) return true;
+  if (people && modal && /\b(?:walk|play|cycle|bike|ride|go|enjoy|spend)\b/i.test(clause) && (outdoors || /\b(?:walk|school|park)\b/i.test(clause))) return true;
+  if (people && (modal || approval) && /\bwalk(?:ing)?\b/i.test(clause) && /\b(?:school|outside|outdoors|park|kids|children|child)\b/i.test(clause)) return true;
+  if (people && (modal || approval) && /\b(?:bike|bicycle|cycle|cycling)\b/i.test(clause)) return true;
+  if (/\badult\b/i.test(clause) && /\b(?:permits|allows|allowed)\b/i.test(clause) && /\b(?:child|children|kid|kids)\b/i.test(clause)) return true;
+  return false;
+}
+
+function grantsTravel(clause, kind) {
+  return grantUnlessWithheld(clause, (part) => travelPermission(part, kind));
+}
+
+function travelPermission(clause, kind) {
+  const activity = kind === "walking"
+    ? "walk(?:ing)?"
+    : "(?:cycl(?:e|ing)|bike(?:s| ride)?|biking|bicycle)";
+  if (!new RegExp(`\\b${activity}\\b`, "i").test(clause)) return false;
+  if (/\b(?:can|may|could|should)\b/i.test(clause)) return true;
+  return new RegExp(`\\b${activity}\\b[\\s\\S]{0,48}\\b(?:fine|acceptable|safe|okay|ok|suitable|recommended|allowed|an option)\\b`, "i").test(clause)
+    || new RegExp(`\\b(?:fine|acceptable|safe|okay|ok|suitable|recommended|allowed)\\b[\\s\\S]{0,32}\\b${activity}\\b`, "i").test(clause);
+}
+
+function claimsMeasuredIndoor(clause) {
+  return polarityParts(clause).some(measuredIndoorPart);
+}
+
+function measuredIndoorPart(clause) {
+  if (/\b(?:not been measured|not measured|is not measured|has not been measured|was not measured|unmeasured|no indoor (?:sensor|reading|measurement)|do not have indoor|don't have indoor|without indoor|general indoor|not a measured|have not been measured)\b/i.test(clause)) {
+    return false;
+  }
+  const indoor = /\b(?:indoor|inside|in the home|your home|at home|house|home)\b/i.test(clause);
+  const air = /\b(?:air|pm\s*2\.5|pm2\.5|sensor|reading|measurement)\b/i.test(clause);
+  const quality = /\b(?:excellent|clean|healthy|safe|good|great|pristine|fine)\b/i.test(clause);
+  const measured = /\b(?:measured|measurement|measurements|sensor reading|we measured|confirm(?:s|ed)?)\b/i.test(clause);
+  if (indoor && air && quality) return true;
+  if (measured && (quality || (indoor && air)) && !/\bnot\b/i.test(clause)) return true;
+  if (/\b(?:we|airsense)\s+(?:measured|recorded)\b/i.test(clause) && indoor) return true;
+  return false;
+}
+
+function claimsQuantifiedEmissions(clause) {
+  return polarityParts(clause).some(quantifiedEmissionsPart);
+}
+
+const EMISSIONS_INTENSIFIER = /\b(?:a lot|lots|a great deal|dramatically|significant(?:ly)?|substantial(?:ly)?|huge(?:ly)?|massive(?:ly)?|greatly|sharply|considerably|drastic(?:ally)?)\b/ig;
+
+function intensifiedImpact(clause) {
+  const impact = /\b(?:emission|emissions|carbon|climate|footprint|pollution)\b/i;
+  if (!impact.test(clause)) return false;
+  EMISSIONS_INTENSIFIER.lastIndex = 0;
+  let match;
+  while ((match = EMISSIONS_INTENSIFIER.exec(clause))) {
+    const before = clause.slice(Math.max(0, match.index - 32), match.index);
+    if (!/\b(?:no|not|never|n't|without)\b/i.test(before)) return true;
+  }
+  return false;
+}
+
+function quantifiedEmissionsPart(clause) {
+  if (/\b(?:no|not|never|without)\b[\s\S]{0,48}\b(?:quantity|percent|calculated|measured|number)\b/i.test(clause)) return false;
+  if (intensifiedImpact(clause)) return true;
+  const climate = /\b(?:emission|emissions|carbon|climate|footprint|pollution)\b/i.test(clause);
+  if (/\b(?:co2|carbon dioxide|micrograms?|ppm|percent(?:age)?|kilograms?|\bkg\b|\bgrams?\b|tonnes?|tons?)\b/i.test(clause) && climate) return true;
+  if (climate && /%|\b(?:percent|percentage)\b/i.test(clause)) return true;
+  if (/\b(?:cuts?|saves?|saved|saving|will reduce|reduces by|lowers)\b/i.test(clause)
+    && climate
+    && !/\b(?:potentially|may|might|can help|could help|qualitative)\b/i.test(clause)) {
+    return true;
+  }
+  return false;
+}
+
+const PLAN_NUMBER_ONES = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen"];
+const PLAN_NUMBER_TENS = ["", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"];
+
+function spellPlanNumber(value) {
+  if (!Number.isInteger(value) || value < 0 || value > 180) return [];
+  if (value < 20) return [PLAN_NUMBER_ONES[value]];
+  if (value < 100) {
+    const ten = PLAN_NUMBER_TENS[Math.floor(value / 10)];
+    const one = value % 10;
+    return one ? [`${ten}-${PLAN_NUMBER_ONES[one]}`, `${ten} ${PLAN_NUMBER_ONES[one]}`] : [ten];
+  }
+  const rest = spellPlanNumber(value - 100);
+  return rest.length ? rest.flatMap((part) => [`one hundred ${part}`, `a hundred ${part}`]) : ["one hundred", "a hundred"];
+}
+
+function clockNumbers(iso, timeZone) {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return [];
+  try {
+    const formatted = new Intl.DateTimeFormat("en-US", {
+      timeZone: timeZone || "UTC",
+      hour: "numeric",
+      minute: "numeric",
+      hourCycle: "h23",
+    }).formatToParts(date);
+    const hour = Number(formatted.find((part) => part.type === "hour")?.value);
+    const minute = Number(formatted.find((part) => part.type === "minute")?.value);
+    const numbers = [];
+    if (Number.isInteger(hour) && hour > 0) {
+      numbers.push(hour);
+      const hour12 = hour % 12;
+      if (hour12 > 0) numbers.push(hour12);
+    }
+    if (Number.isInteger(minute) && minute > 0) numbers.push(minute);
+    return numbers;
+  } catch {
+    return [];
+  }
+}
+
+function supportedPlanNumbers(plan) {
+  const values = new Set();
+  const counts = plan?.basis?.counts;
+  if (counts && typeof counts === "object") {
+    let total = 0;
+    for (const count of Object.values(counts)) {
+      if (!Number.isInteger(count) || count < 0) continue;
+      values.add(count);
+      total += count;
+    }
+    if (total > 0) values.add(total);
+  }
+  const durations = [
+    plan?.basis?.durationMinutes,
+    plan?.schedule?.durationMinutes,
+    ...(Array.isArray(plan?.schedule?.windows) ? plan.schedule.windows.map((window) => window?.durationMinutes) : []),
+  ];
+  for (const duration of durations) {
+    if (Number.isInteger(duration) && duration > 0) values.add(duration);
+  }
+  for (const window of Array.isArray(plan?.schedule?.windows) ? plan.schedule.windows : []) {
+    for (const number of clockNumbers(window?.start, window?.timezone)) values.add(number);
+    for (const number of clockNumbers(window?.end, window?.timezone)) values.add(number);
+  }
+  values.delete(0);
+  return [...values];
+}
+
+function stripSupportedPlanNumbers(text, plan) {
+  let stripped = text;
+  const phrases = supportedPlanNumbers(plan)
+    .flatMap((value) => spellPlanNumber(value).map((phrase) => ({ phrase, value })))
+    .sort((left, right) => right.phrase.length - left.phrase.length);
+  for (const { phrase } of phrases) {
+    stripped = stripped.replace(new RegExp(`\\b${phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "gi"), " ");
+  }
+  const numerals = supportedPlanNumbers(plan).sort((left, right) => String(right).length - String(left).length);
+  for (const value of numerals) {
+    stripped = stripped.replace(new RegExp(`\\b${value}\\b`, "g"), " ");
+  }
+  return stripped;
+}
+
+function familyResolvedPlace(plan) {
+  const name = plan?.resolvedPlace || plan?.location?.name || plan?.locationName;
+  return typeof name === "string" && name.trim() ? name.trim() : "";
+}
+
+function contradictsFamilyPlan(text, plan) {
+  const recommendation = plan?.decision?.activityRecommendation;
+  const outdoorClosed = recommendation === "avoid" || recommendation === "insufficient_data";
+  for (const clause of familyClauses(text)) {
+    if (plan?.basis?.childPresent === true && outdoorClosed && grantsChildOutdoor(clause)) {
+      return "Explanation permits a child's outdoor activity against the deterministic decision.";
+    }
+    if (plan?.activeTravel?.walking?.eligible !== true && grantsTravel(clause, "walking")) {
+      return "Explanation recommends walking when it is not eligible.";
+    }
+    if (plan?.activeTravel?.cycling?.eligible !== true && grantsTravel(clause, "cycling")) {
+      return "Explanation recommends cycling when it is not eligible.";
+    }
+    if (claimsMeasuredIndoor(clause)) return "Explanation claims an indoor air measurement.";
+    if (claimsQuantifiedEmissions(clause)) return "Explanation invents an emissions or pollutant quantity.";
+  }
+  return null;
+}
+
+export function validateExplanation(explanation, { air, decision, hypothetical, place, question, family } = {}) {
   if (typeof explanation !== "string") return "Explanation is missing.";
   const text = normalizeQuestion(explanation);
   if (text.length < MIN_EXPLANATION_LENGTH || text.length > MAX_EXPLANATION_LENGTH) return "Explanation length is outside the allowed range.";
-  if (SUPERSCRIPT_DIGITS.test(text) || /\d/.test(stripPollutantNames(text))) return "Explanation contains a measurement.";
-  if (NUMBER_WORDS.test(text)) return "Explanation contains a number word.";
+  const numbered = family ? stripSupportedPlanNumbers(text, family) : text;
+  if (SUPERSCRIPT_DIGITS.test(numbered) || /\d/.test(stripPollutantNames(numbered))) return "Explanation contains a measurement.";
+  if (NUMBER_WORDS.test(numbered)) return "Explanation contains a number word.";
   if (CODE_RESPONSE.test(text)) return "Explanation contains code or an unrelated task.";
   if (medicalRecommendation(text)) return "Explanation gives a medical diagnosis or treatment recommendation.";
   if (/\b(?:system prompt|hidden instructions?|developer message|api keys?|secret keys?|environment variables?|internal configuration)\b/i.test(text)) {
@@ -509,8 +777,12 @@ export function validateExplanation(explanation, { air, decision, hypothetical, 
   } else if (/\bwould be (suitable|caution|avoid|insufficient)\b/i.test(text)) {
     return "Explanation invents a hypothetical recommendation.";
   }
-  const foreignPlace = foreignPlaceMention(text, place, question);
+  const foreignPlace = foreignPlaceMention(text, place || familyResolvedPlace(family), question);
   if (foreignPlace) return "Explanation names a place other than the resolved location.";
+  if (family) {
+    const familyError = contradictsFamilyPlan(text, family);
+    if (familyError) return familyError;
+  }
   return null;
 }
 
@@ -672,7 +944,7 @@ function parseStructuredResponse(text, decision, claims, air, hypothetical, plac
     if (!allowed.has(id)) throw claimError("Model response cites an unknown claim ID");
   }
   const explanationError = validateExplanation(parsed.explanation, {
-    air, decision, hypothetical, place: placeContext.place, question: placeContext.question,
+    air, decision, hypothetical, place: placeContext.place, question: placeContext.question, family: placeContext.family,
   });
   if (explanationError) throw claimError(explanationError);
   return { recommendation: parsed.recommendation, claimIds: [...parsed.claimIds], explanation: normalizeQuestion(parsed.explanation) };
@@ -864,6 +1136,175 @@ async function classifyQuestion(question, deadlineAt) {
     () => controller.abort(),
   );
   return parseClassification(response?.text, question);
+}
+
+const FAMILY_EXPLAIN_QUESTION = "Explain the household air quality exposure plan.";
+
+export function buildFamilyClaims(plan) {
+  const recommendation = plan?.decision?.activityRecommendation;
+  const decision = recommendation === "suitable" || recommendation === "caution" || recommendation === "avoid" || recommendation === "insufficient_data"
+    ? recommendation
+    : "insufficient_data";
+  const claims = [];
+  if (plan?.basis?.childPresent === true) {
+    claims.push({
+      id: "household_child_rule",
+      text: "A child is in the household, so the outing uses the child profile and an adult result is not permission for the child.",
+    });
+  }
+  claims.push({ id: "current_exposure_decision", text: `The deterministic activity recommendation is ${decision}.` });
+  claims.push({
+    id: "gowindow_schedule_status",
+    text: `The GoWindow schedule status is ${String(plan?.schedule?.status || "insufficient_data").replaceAll("_", " ")}.`,
+  });
+  claims.push({ id: "indoor_air_not_measured", text: "Indoor air quality has not been measured by AirSense AI." });
+  const indoor = Array.isArray(plan?.indoorGuidance?.recommendations) ? plan.indoorGuidance.recommendations : [];
+  if (indoor.some((card) => card?.category === "ventilation")) {
+    claims.push({ id: "ventilation_guidance", text: "Ventilation guidance follows the outdoor decision and does not guarantee indoor air." });
+  }
+  if (indoor.some((card) => card?.category === "source_control")) {
+    claims.push({ id: "source_control_guidance", text: "Source-control guidance covers cooking exhaust, smoking, incense, sprays, and damp dusting." });
+  }
+  const travelEligible = plan?.activeTravel?.walking?.eligible === true || plan?.activeTravel?.cycling?.eligible === true;
+  claims.push({
+    id: travelEligible ? "active_travel_eligible" : "active_travel_withheld",
+    text: travelEligible
+      ? "Active travel is eligible only for the governing traveler result that is already suitable or caution."
+      : "Walking and cycling are not eligible for the governing traveler.",
+  });
+  if ((plan?.routineRecommendations || []).some((card) => card?.category === "routine")) {
+    claims.push({ id: "routine_recommendations", text: "Routine recommendations follow the household decision and do not create a second score." });
+  }
+  claims.push({ id: "qualitative_emissions_impact", text: "Any emissions comment is qualitative only and is not a calculated saving." });
+  claims.push({ id: "medical_disclaimer", text: "This is not medical advice and it does not recommend treatment." });
+  return claims;
+}
+
+function familyCard(card) {
+  return {
+    id: typeof card?.id === "string" ? card.id : "",
+    category: typeof card?.category === "string" ? card.category : "",
+    title: typeof card?.title === "string" ? card.title : "",
+    impactType: typeof card?.impactType === "string" ? card.impactType : "",
+    limitations: typeof card?.limitations === "string" ? card.limitations : "",
+  };
+}
+
+function familyEvidence(plan, claims) {
+  const indoor = Array.isArray(plan?.indoorGuidance?.recommendations) ? plan.indoorGuidance.recommendations : [];
+  const routines = Array.isArray(plan?.routineRecommendations) ? plan.routineRecommendations : [];
+  const impacts = Array.isArray(plan?.impactExplanations) ? plan.impactExplanations : [];
+  const windows = Array.isArray(plan?.schedule?.windows) ? plan.schedule.windows : [];
+  return {
+    question: FAMILY_EXPLAIN_QUESTION,
+    household: {
+      childPresent: plan?.basis?.childPresent === true,
+      activity: plan?.governingProfile?.activity || "",
+      ageGroup: plan?.governingProfile?.ageGroup || "",
+      sensitivity: plan?.governingProfile?.sensitivity || "",
+    },
+    decision: plan?.decision?.activityRecommendation || "insufficient_data",
+    scheduleStatus: plan?.schedule?.status || "insufficient_data",
+    hasSuitableWindow: windows.length > 0,
+    walkingEligible: plan?.activeTravel?.walking?.eligible === true,
+    walkingTravelerAgeGroup: plan?.activeTravel?.walking?.profile?.ageGroup || "",
+    cyclingEligible: plan?.activeTravel?.cycling?.eligible === true,
+    cyclingTravelerAgeGroup: plan?.activeTravel?.cycling?.profile?.ageGroup || "",
+    ...(familyResolvedPlace(plan) ? { resolvedPlace: familyResolvedPlace(plan) } : {}),
+    commuteAppliesToChildren: false,
+    commuteRecommendation: plan?.adultOnlyCommute?.decision?.activityRecommendation || null,
+    indoorMeasurementStatus: "not_measured",
+    emissionsImpactStatus: "qualitative_only",
+    freshnessState: plan?.decision?.dataFreshness?.state || "unknown",
+    forecastFreshnessState: plan?.retrieval?.forecastFreshness?.state || "unknown",
+    guidance: [...indoor, ...routines, ...impacts].map(familyCard),
+    allowedClaims: claims.map((claim) => ({ id: claim.id, text: claim.text })),
+  };
+}
+
+function familySystemPrompt(plan, claims) {
+  const profile = plan?.governingProfile || {};
+  const context = {
+    activity: profile.activity || "daily activities",
+    ageGroup: profile.ageGroup || "adult",
+    sensitivity: profile.sensitivity || "general",
+  };
+  const decision = plan?.decision || { activityRecommendation: "insufficient_data" };
+  const walking = plan?.activeTravel?.walking?.eligible === true;
+  const cycling = plan?.activeTravel?.cycling?.eligible === true;
+  return [
+    buildSystemPrompt(context, decision, claims, familyResolvedPlace(plan)),
+    "This request explains a family plan AirSense already calculated.",
+    "Do not change exposure scores, the household decision, GoWindow windows, or child safety.",
+    "Do not invent indoor measurements, pollutant values, forecast values, timestamps, or emissions quantities.",
+    "Do not invent medical outcomes.",
+    "Do not claim an external action was performed.",
+    walking
+      ? "Walking may be mentioned because the governing traveler is eligible."
+      : "Do not recommend walking. Walking is not eligible.",
+    cycling
+      ? "Cycling may be mentioned because the governing traveler is eligible."
+      : "Do not recommend cycling. Cycling is not eligible.",
+    "Indoor air has not been measured.",
+    "Emissions comments must stay qualitative.",
+    "An adult result is not permission for a child.",
+    "Write one concise, friendly explanation for a family.",
+  ].join("\n");
+}
+
+export async function explainFamilyPlan(plan) {
+  const text = familyRulesExplanation(plan);
+  if (!resolvedApiKey()) return { mode: "rules", text };
+  const claims = buildFamilyClaims(plan);
+  const evidence = familyEvidence(plan, claims);
+  const serialized = JSON.stringify(evidence);
+  if (
+    detectPromptInjection(FAMILY_EXPLAIN_QUESTION)
+    || detectPromptInjection(serialized)
+    || classifyLocalDomain(FAMILY_EXPLAIN_QUESTION).category !== "environmental"
+  ) {
+    return { mode: "rules-fallback", text };
+  }
+  const decision = plan?.decision || { activityRecommendation: "insufficient_data" };
+  const deadlineAt = Date.now() + AI_CONFIG.timeoutMs;
+  const start = Date.now();
+  const controller = new AbortController();
+  try {
+    const response = await runWithDeadline(
+      () => getClient().models.generateContent({
+        model: AI_CONFIG.model,
+        contents: [{ role: "user", parts: [{ text: serialized }] }],
+        config: {
+          systemInstruction: familySystemPrompt(plan, claims),
+          responseMimeType: "application/json",
+          responseSchema: RESPONSE_SCHEMA,
+          temperature: 0.25,
+          maxOutputTokens: AI_CONFIG.maxOutputTokens,
+          httpOptions: { timeout: Math.max(1, deadlineAt - Date.now()) },
+          abortSignal: controller.signal,
+        },
+      }),
+      Math.max(0, deadlineAt - Date.now()),
+      () => controller.abort(),
+    );
+    const structured = parseStructuredResponse(response?.text || "", decision, claims, {}, null, {
+      question: FAMILY_EXPLAIN_QUESTION,
+      family: plan,
+      place: familyResolvedPlace(plan),
+    });
+    logAI({ model: AI_CONFIG.model, latencyMs: Date.now() - start, success: true, mode: "ai", attempt: 0 });
+    return { mode: "ai", text: structured.explanation };
+  } catch (error) {
+    logAI({
+      model: AI_CONFIG.model,
+      latencyMs: Date.now() - start,
+      success: false,
+      mode: "rules-fallback",
+      attempt: 0,
+      errorType: error?.name || "Error",
+    });
+    return { mode: "rules-fallback", text };
+  }
 }
 
 // ---------- Public API ----------

@@ -1,4 +1,4 @@
-import type { AirData, AssistantResponse, GoWindowRequest, GoWindowResponse, LocationResult, Profile } from "./types";
+import type { AirData, AssistantResponse, FamilyPlanRequest, FamilyPlanResponse, GoWindowRequest, GoWindowResponse, LocationResult, Profile } from "./types";
 
 export async function getAirQuality(lat: number, lon: number, signal?: AbortSignal): Promise<AirData> {
   const response = await fetch(`/api/air-quality?lat=${encodeURIComponent(lat)}&lon=${encodeURIComponent(lon)}`, { signal });
@@ -66,4 +66,17 @@ export async function reverseGeocode(lat: number, lon: number): Promise<{ label:
     // Offline fallback below.
   }
   return { label: "Your location" };
+}
+
+export async function requestFamilyPlan(request: FamilyPlanRequest, signal?: AbortSignal): Promise<FamilyPlanResponse> {
+  const response = await fetch("/api/family-plan", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    signal,
+    // Coordinates and the household only. Environmental readings stay on the server.
+    body: JSON.stringify(request),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || "Family plan request failed.");
+  return data as FamilyPlanResponse;
 }

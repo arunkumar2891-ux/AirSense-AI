@@ -1052,6 +1052,90 @@ select:focus-visible {
   .card-top { align-items: flex-start; }
 }
 
+.family-section { margin-top: 38px; }
+.family-section h2 { max-width: 760px; font-size: 28px; letter-spacing: -0.6px; }
+.family-section .section-header p { max-width: 680px; color: var(--text-secondary); font-size: 14px; line-height: 1.5; }
+.family-panel {
+  padding: 20px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+}
+.family-panel fieldset { margin: 0 0 16px; padding: 0; border: 0; }
+.family-panel legend { margin-bottom: 6px; color: var(--text); font-size: 14px; font-weight: 650; }
+.family-panel small,
+.family-disclaimer,
+.family-limitations,
+.family-actions p,
+.family-status,
+.family-explanation-label { color: var(--text-secondary); font-size: 14px; line-height: 1.5; }
+.family-count-grid,
+.family-outing { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+.family-outing { grid-template-columns: repeat(2, minmax(0, 1fr)); margin-bottom: 14px; }
+.family-count-grid label,
+.family-outing label,
+.family-field { display: flex; flex-direction: column; gap: 6px; color: var(--text); font-size: 14px; font-weight: 650; }
+.family-panel input,
+.family-panel select {
+  min-height: 44px;
+  padding: 8px 10px;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  font-size: 16px;
+  font-weight: 500;
+}
+.family-routine-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 16px; }
+.family-routine-grid label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 550;
+}
+.family-routine-grid input { width: 18px; height: 18px; min-height: 18px; }
+.family-field { margin-bottom: 16px; }
+.family-actions { display: flex; align-items: center; gap: 16px; margin-top: 8px; }
+.family-actions p { margin: 0; }
+.family-validation { margin: 0 0 12px; color: var(--danger); font-size: 14px; }
+.family-results { margin-top: 18px; }
+.family-block { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border); }
+.family-block h3 { margin: 0 0 8px; color: var(--text); font-size: 16px; }
+.family-block p,
+.family-block li { color: var(--text); font-size: 14px; line-height: 1.5; }
+.family-recommendation { display: flex; flex-wrap: wrap; gap: 8px 14px; margin: 0 0 8px; }
+.family-recommendation b { font-size: 16px; }
+.recommendation-suitable b { color: var(--blue-deep); }
+.recommendation-caution b { color: var(--orange-deep); }
+.recommendation-avoid b,
+.recommendation-insufficient_data b { color: var(--danger); }
+.family-state.error { padding: 12px; color: var(--danger); background: var(--danger-soft); border: 1px solid var(--danger); border-radius: var(--radius-sm); }
+.family-windows,
+.family-limitations,
+.family-block ul { margin: 8px 0 0; padding-left: 18px; }
+.family-windows li { display: flex; flex-direction: column; gap: 2px; margin-bottom: 10px; }
+.family-panel code { font-size: 13px; }
+.family-guidance { display: grid; gap: 12px; margin: 8px 0 0; padding: 0; list-style: none; }
+.family-guidance-card {
+  padding: 14px;
+  background: var(--surface-subtle);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.family-guidance-card h4 { margin: 0 0 6px; color: var(--text); font-size: 15px; }
+.family-guidance-card p { margin: 0 0 6px; }
+
+@media (max-width: 760px) {
+  .family-count-grid,
+  .family-outing,
+  .family-routine-grid { grid-template-columns: 1fr; }
+  .family-actions { align-items: stretch; flex-direction: column; }
+}
+
 @media (prefers-reduced-motion: reduce) {
   :root { scroll-behavior: auto; }
   *,
