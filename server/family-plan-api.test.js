@@ -168,7 +168,24 @@ describe("family plan route", { concurrency: 1 }, () => {
   });
 
   test("a child household receives the child plan from one trusted forecast fetch", async () => {
-    const response = await request(app, { method: "POST", url: "/api/family-plan", body: childHousehold() });
+    // Daytime ends at 22:00 local. A 45-minute window that starts in the
+    // current hour ends after 22:00 when this test runs after 21:15
+    // Asia/Kolkata, and the route then reports outside_preference. The route
+    // clock is Date.now() inside production code, and new Date() does not
+    // follow a replaced Date.now, so this request uses time preference "any".
+    // That preference has no clock boundary. Production scheduling is unchanged.
+    const response = await request(app, {
+      method: "POST",
+      url: "/api/family-plan",
+      body: childHousehold({
+        household: {
+          members: [{ ageBand: "young_child", count: 1 }, { ageBand: "adult", count: 1 }],
+          sensitivity: "general",
+          routines: ["children's outdoor play"],
+          outing: { activity: "children's outdoor play", durationMinutes: 45, timePreference: "any" },
+        },
+      }),
+    });
     assert.equal(response.status, 200);
     assert.equal(response.body.ok, true);
     assert.deepEqual(response.body.governingProfile, {

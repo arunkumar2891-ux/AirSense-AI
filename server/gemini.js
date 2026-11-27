@@ -468,8 +468,10 @@ function foreignPlaceMention(text, place, question) {
 // Clause-level checks for a family explanation. They are pattern matching over
 // normalized text, not a second model judgment, and they do not provide
 // complete semantic protection. A prohibited activity is rejected when a
-// separated part grants it. A denial keeps a part only when that part does not
-// leave a later unnegated grant behind. Child outdoor play is also rejected
+// separated part grants it. A denial covers the complement that follows it, so
+// "not a good time to play outside" is a restriction. A later positive
+// predicate in that same part, such as "is fine" or "can play", is still a
+// grant. Child outdoor play is also rejected
 // when the sentence describes an outing, or when children and an outdoor
 // activity co-occur without a restriction and without a rule frame such as
 // "follows the child profile". There is no server-resolved city on a normal
@@ -496,11 +498,44 @@ function clauseWithholds(clause) {
   return /\b(?:do not|don't|dont|never|cannot|can't|cant|should not|shouldn't|must not|mustn't|not recommended|not advised|not offered|not eligible|not permitted|no permission|isn't|is not|aren't|are not|was not|stay inside|indoors|keep(?:\s+\w+){0,3}\s+indoors|move(?:d)? indoors|remain indoors|reschedul(?:e|ed|ing)|postpon(?:e|ed|ing)|withhold|avoid going|avoid outdoor)\b/i.test(clause);
 }
 
+function positiveClaimIndex(after) {
+  const predicate = /\b(?:is|are|was|were)\s+(?:fine|acceptable|safe|okay|ok|suitable|recommended|allowed|an option)\b|\b(?:can|may|could|should)\s+(?:still\s+)?(?:play|go|walk|cycle|bike|ride|enjoy|head|spend)\b/i;
+  const found = predicate.exec(after);
+  if (!found) return -1;
+  const windowStart = Math.max(0, found.index - 48);
+  const window = after.slice(windowStart, found.index);
+  const noun = /(?:a|an|the)\s+[\w'-]+(?:\s+[\w'-]+){0,5}\s*$/i.exec(window);
+  if (!noun) return found.index;
+  return windowStart + noun.index;
+}
+
+function removeNegatedComplements(part) {
+  const source = String(part || "");
+  const negation = /\b(?:cannot|can't|cant|never|n't|without|not|no)\b/gi;
+  let result = "";
+  let cursor = 0;
+  let match;
+  while ((match = negation.exec(source))) {
+    result += source.slice(cursor, match.index);
+    const afterStart = match.index + match[0].length;
+    const restart = positiveClaimIndex(source.slice(afterStart));
+    if (restart === -1) {
+      cursor = source.length;
+      break;
+    }
+    cursor = afterStart + restart;
+    negation.lastIndex = cursor;
+  }
+  result += source.slice(cursor);
+  return result;
+}
+
 function partGrants(part, detect) {
   if (!detect(part)) return false;
   if (!clauseWithholds(part)) return true;
-  const tails = part.split(/\b(?:cannot|can't|cant|without|never|n't|not|no)\b/i).slice(1);
-  return tails.some((tail) => detect(tail) && !clauseWithholds(tail));
+  const uncovered = removeNegatedComplements(part);
+  if (uncovered === part) return false;
+  return detect(uncovered) && !clauseWithholds(uncovered);
 }
 
 function grantUnlessWithheld(clause, detect) {
@@ -1002,8 +1037,49 @@ function runWithDeadline(operation, remainingMs, onTimeout) {
 }
 
 // ---------- Logging (never keys, never personal data) ----------
+const SAFE_CLAIM_REASONS = new Set([
+  "Empty model response",
+  "Model returned non-JSON output",
+  "Model response is not an object",
+  "Model response contains unpublished text",
+  "Model response has invalid recommendation",
+  "Model response has an invalid number of claim IDs",
+  "Model response has an invalid claim ID",
+  "Model response repeats a claim ID",
+  "Model response cites an unknown claim ID",
+  "Explanation is missing.",
+  "Explanation length is outside the allowed range.",
+  "Explanation contains a measurement.",
+  "Explanation contains a number word.",
+  "Explanation contains code or an unrelated task.",
+  "Explanation gives a medical diagnosis or treatment recommendation.",
+  "Explanation discloses internal instructions or configuration.",
+  "Explanation claims an external action.",
+  "Explanation makes an unsupported claim about current conditions.",
+  "Explanation states a current PM2.5 reading that was not available.",
+  "Explanation names a category that does not match the trusted reading.",
+  "Explanation states a recommendation that does not match the deterministic decision.",
+  "Explanation gives a favorable activity recommendation without usable current data.",
+  "Explanation treats excluded wind as a current condition.",
+  "Explanation does not label the wind scenario as hypothetical.",
+  "Explanation presents the hypothetical wind as a retrieved measurement.",
+  "Explanation invents a hypothetical recommendation.",
+  "Explanation names a place other than the resolved location.",
+  "Explanation permits a child's outdoor activity against the deterministic decision.",
+  "Explanation recommends walking when it is not eligible.",
+  "Explanation recommends cycling when it is not eligible.",
+  "Explanation claims an indoor air measurement.",
+  "Explanation invents an emissions or pollutant quantity.",
+]);
+
+function safeClaimReason(error) {
+  if (error?.name !== "ClaimValidation") return undefined;
+  const message = typeof error?.message === "string" ? error.message : "";
+  return SAFE_CLAIM_REASONS.has(message) ? message : undefined;
+}
+
 function logAI(event) {
-  const { model, latencyMs, success, mode, attempt, errorType } = event;
+  const { model, latencyMs, success, mode, attempt, errorType, reason } = event;
   console.log(JSON.stringify({
     ts: new Date().toISOString(),
     service: "airsense-ai",
@@ -1014,6 +1090,7 @@ function logAI(event) {
     mode,
     attempt,
     ...(errorType ? { errorType } : {}),
+    ...(reason ? { reason } : {}),
   }));
 }
 
@@ -1302,6 +1379,7 @@ export async function explainFamilyPlan(plan) {
       mode: "rules-fallback",
       attempt: 0,
       errorType: error?.name || "Error",
+      reason: safeClaimReason(error),
     });
     return { mode: "rules-fallback", text };
   }

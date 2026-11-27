@@ -469,6 +469,65 @@ test("a denial does not hide a later prohibited permission", async () => {
   assert.equal(household.schedule, schedule);
 });
 
+test("negated child outdoor restrictions are accepted and a later permission is rejected", () => {
+  const avoid = plan();
+  const insufficient = plan({ decision: { activityRecommendation: "insufficient_data", dataFreshness: { state: "stale" }, wind: { state: "included" } } });
+  const insufficientLead = lead.replace("avoid", "insufficient data");
+  const accepted = [
+    "It is not a good time for the kids to play outside.",
+    "It is not safe for children to play outside.",
+    "Outdoor play is not recommended.",
+    "Children should not play outdoors.",
+    "It is not advisable for children to go outside.",
+  ];
+  const rejected = [
+    "Children can play outside.",
+    "It is not safe for children to play outside, but they can still play in the park.",
+    "Outdoor play is not recommended, although children can play outside.",
+    "The children should stay indoors, but a short outdoor play session is fine.",
+  ];
+  for (const line of accepted) {
+    assert.equal(validateExplanation(lead + line, familyContext(avoid)), null, line);
+    assert.equal(validateExplanation(insufficientLead + line, familyContext(insufficient)), null, line);
+  }
+  for (const line of rejected) {
+    assert.match(validateExplanation(lead + line, familyContext(avoid)), /child's outdoor activity/i, line);
+    assert.match(validateExplanation(insufficientLead + line, familyContext(insufficient)), /child's outdoor activity/i, line);
+  }
+  assert.equal(validateExplanation(familyRulesExplanation(avoid), familyContext(avoid)), null);
+  assert.equal(validateExplanation(familyRulesExplanation(insufficient), familyContext(insufficient)), null);
+});
+
+test("a real child outdoor permission is rejected and the short reason is logged", async () => {
+  const household = plan();
+  const explanation = "The household decision is avoid. Children can play outside. Indoor air quality has not been measured by AirSense AI. Walking and cycling are not offered.";
+  const reason = "Explanation permits a child's outdoor activity against the deterministic decision.";
+  assert.equal(validateExplanation(explanation, familyContext(household)), reason);
+  assert.equal(validateExplanation(familyRulesExplanation(household), familyContext(household)), null);
+
+  const logs = [];
+  const originalLog = console.log;
+  console.log = (...args) => logs.push(args.join(" "));
+  try {
+    behavior = { type: "text", body: modelBody(explanation) };
+    const result = await explainFamilyPlan(household);
+    assert.equal(result.mode, "rules-fallback");
+    assert.equal(result.text, familyRulesExplanation(household));
+    assert.equal(household.decision.activityRecommendation, "avoid");
+    assert.equal(household.schedule.status, "no_suitable_window");
+  } finally {
+    console.log = originalLog;
+  }
+  const entry = logs.map((line) => JSON.parse(line)).find((item) => item.errorType === "ClaimValidation");
+  assert.equal(entry.reason, reason);
+  assert.equal(entry.mode, "rules-fallback");
+  assert.equal(entry.success, false);
+  const logged = JSON.stringify(entry);
+  assert.equal(logged.includes("can play"), false);
+  assert.equal(logged.includes("play outside"), false);
+  assert.equal(logged.includes("13.0827"), false);
+});
+
 test("unsupported emissions magnitude claims are rejected and hedged guidance is kept", () => {
   const household = plan();
   for (const line of [
