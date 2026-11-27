@@ -1,4 +1,5 @@
 import { Users } from "lucide-react";
+import CollapsibleSection from "./CollapsibleSection";
 import type { FamilyGuidanceCard, FamilyPlanResponse, GoWindowTimePreference } from "./types";
 import {
   FAMILY_ROUTINES,
@@ -23,6 +24,8 @@ type Props = {
   explainLoading: boolean;
   explainError: string;
   onExplain: () => void;
+  expanded: boolean;
+  onToggle: () => void;
 };
 
 function GuidanceCards({ cards, label }: { cards: FamilyGuidanceCard[]; label: string }) {
@@ -47,7 +50,7 @@ const counts = [
 
 export default function FamilyPanel({
   locationLabel, household, onHouseholdChange, loading, error, result, now, onPlan,
-  explainLoading, explainError, onExplain,
+  explainLoading, explainError, onExplain, expanded, onToggle,
 }: Props) {
   const validation = validateFamilyDraft(household);
   const view = presentFamilyPlan(result);
@@ -67,15 +70,21 @@ export default function FamilyPanel({
     onHouseholdChange({ ...household, routines });
   }
 
-  return <section className="section-block family-section" id="family" aria-labelledby="family-title">
-    <div className="section-header">
-      <div>
+  return <CollapsibleSection
+    id="family"
+    titleId="family-title"
+    className="section-block family-section"
+    expanded={expanded}
+    onToggle={onToggle}
+    header={<>
+      <span className="section-toggle-copy">
         <span className="section-kicker">HOUSEHOLD PLANNING</span>
-        <h2 id="family-title">Family air plan</h2>
-        <p>Plan one shared outing for this household. It uses the selected location, {locationLabel}, and does not change the GoWindow activity profile.</p>
-      </div>
+        <span className="section-title" id="family-title">Family air plan</span>
+        <span className="section-summary">Plan one shared outing for this household. It uses the selected location, {locationLabel}, and does not change the GoWindow activity profile.</span>
+      </span>
       <span className="forecast-note"><Users size={15} aria-hidden="true"/> Household plan</span>
-    </div>
+    </>}
+  >
     <div className="family-panel">
       <form onSubmit={(event) => { event.preventDefault(); onPlan(); }}>
         <fieldset className="family-counts">
@@ -244,5 +253,5 @@ export default function FamilyPanel({
         </>}
       </div>
     </div>
-  </section>;
+  </CollapsibleSection>;
 }

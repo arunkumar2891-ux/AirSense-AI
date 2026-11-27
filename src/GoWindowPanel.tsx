@@ -1,5 +1,6 @@
 import { Clock } from "lucide-react";
 import type { GoWindowResponse, GoWindowTimePreference, Profile } from "./types";
+import CollapsibleSection from "./CollapsibleSection";
 import { GO_WINDOW_DURATIONS, GO_WINDOW_TIME_PREFERENCES, presentGoWindow } from "./gowindow";
 import ActivityTimeline from "./ActivityTimeline";
 import type { TimelineHourReading } from "./timeline";
@@ -29,21 +30,29 @@ type Props = {
   hourly: TimelineHourReading[];
   timezone: string | null;
   onFind: () => void;
+  expanded: boolean;
+  onToggle: () => void;
 };
 
 export default function GoWindowPanel({
-  locationLabel, profile, onProfileChange, duration, onDurationChange, timePreference, onTimePreferenceChange, loading, error, result, hourly, timezone, onFind,
+  locationLabel, profile, onProfileChange, duration, onDurationChange, timePreference, onTimePreferenceChange, loading, error, result, hourly, timezone, onFind, expanded, onToggle,
 }: Props) {
   const display = presentGoWindow(result);
-  return <section className="section-block gowindow-section" id="gowindow" aria-labelledby="gowindow-title">
-    <div className="section-header">
-      <div>
+  return <CollapsibleSection
+    id="gowindow"
+    titleId="gowindow-title"
+    className="section-block gowindow-section"
+    expanded={expanded}
+    onToggle={onToggle}
+    header={<>
+      <span className="section-toggle-copy">
         <span className="section-kicker">FORECAST PLANNING</span>
-        <h2 id="gowindow-title">GoWindow – Find your best time to go outside</h2>
-        <p>Plan your outdoor activities around forecast air quality and weather.</p>
-      </div>
+        <span className="section-title" id="gowindow-title">GoWindow – Find your best time to go outside</span>
+        <span className="section-summary">Plan your outdoor activities around forecast air quality and weather.</span>
+      </span>
       <span className="forecast-note"><Clock size={15} aria-hidden="true"/> Forecast estimate</span>
-    </div>
+    </>}
+  >
     <div className="gowindow-panel">
       <div className="gowindow-intro">
         <h3>When is the best time for me to go outside today?</h3>
@@ -164,5 +173,5 @@ export default function GoWindowPanel({
         {!loading && !error && !display && <p className="gowindow-status">Choose a duration, then find the best forecast window for this activity.</p>}
       </div>
     </div>
-  </section>;
+  </CollapsibleSection>;
 }

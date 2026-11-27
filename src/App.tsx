@@ -6,8 +6,11 @@ import type { AirData, AssistantLocation, DecisionTrace, ExposureDecision, Famil
 import { describeCurrentActivityGuidance, describeWindUse, formatReportedWindSpeed, formatSourceDisclosure, formatTimingDisclosure, getAqiPresentation, getFreshnessPresentation, isLatestRequest, shouldApplyGpsResult, US_AQI_CATEGORIES } from "./reliability";
 import { buildGoWindowRequest, DEFAULT_GO_WINDOW_DURATION, DEFAULT_TIME_PREFERENCE, goWindowRequestKey } from "./gowindow";
 import { FAMILY_STORAGE_KEY, buildFamilyPlanRequest, canApplyFamilyExplanation, canStartFamilyExplanation, familyPlanForDisplay, familyPlanRequestKey, loadFamilyHousehold, serializeFamilyHousehold, type FamilyDraft } from "./family";
+import { expandSection, readSectionExpanded, sectionFromHash, toggleSection, writeSectionExpanded, type SectionId } from "./sections";
 import GoWindowPanel from "./GoWindowPanel";
 import FamilyPanel from "./FamilyPanel";
+import CollapsibleSection from "./CollapsibleSection";
+import BackToTop from "./BackToTop";
 import ThemeSelector from "./ThemeSelector";
 
 const fallbackCity = { name: "Chennai, Tamil Nadu, India", lat: 13.0827, lon: 80.2707 };
@@ -98,7 +101,37 @@ function App() {
   const [familyExplainLoading, setFamilyExplainLoading] = useState(false);
   const [familyExplainError, setFamilyExplainError] = useState("");
   const [familyExplanation, setFamilyExplanation] = useState<FamilyPlanResponse["explanation"] | null>(null);
+  const [sections, setSections] = useState(() => {
+    try { return readSectionExpanded(sessionStorage); } catch { return readSectionExpanded(null); }
+  });
   const [clockNow, setClockNow] = useState(() => Date.now());
+
+  function toggleDashboardSection(id: SectionId) {
+    setSections((current) => {
+      const next = toggleSection(current, id);
+      try { writeSectionExpanded(sessionStorage, next); } catch { /* keep the choice for this render */ }
+      return next;
+    });
+  }
+
+  function openDashboardSection(id: SectionId) {
+    setSections((current) => {
+      const next = expandSection(current, id);
+      if (next === current) return current;
+      try { writeSectionExpanded(sessionStorage, next); } catch { /* keep the choice for this render */ }
+      return next;
+    });
+  }
+
+  useEffect(() => {
+    const openHashedSection = () => {
+      const id = sectionFromHash(window.location.hash);
+      if (id) openDashboardSection(id);
+    };
+    openHashedSection();
+    window.addEventListener("hashchange", openHashedSection);
+    return () => window.removeEventListener("hashchange", openHashedSection);
+  }, []);
 
   useEffect(() => {
     const timer = window.setInterval(() => setClockNow(Date.now()), 60_000);
@@ -518,10 +551,10 @@ function App() {
       <div className="brand"><div className="brand-icon"><Wind size={22}/></div><div><strong>AirSense<span> AI</span></strong><small>URBAN AIR INTELLIGENCE</small></div></div>
       <nav className="primary-nav" aria-label="Dashboard sections">
         <a className="nav" href="#overview"><Activity size={17}/> Overview</a>
-        <a className="nav" href="#gowindow"><Clock size={17}/> GoWindow</a>
-        <a className="nav" href="#family"><Users size={17}/> Family</a>
-        <a className="nav" href="#pollutants"><Compass size={17}/> Pollutants</a>
-        <a className="nav" href="#assistant"><MessageCircle size={17}/> AI Assistant</a>
+        <a className="nav" href="#gowindow" onClick={() => openDashboardSection("gowindow")}><Clock size={17}/> GoWindow</a>
+        <a className="nav" href="#family" onClick={() => openDashboardSection("family")}><Users size={17}/> Family</a>
+        <a className="nav" href="#pollutants" onClick={() => openDashboardSection("pollutants")}><Compass size={17}/> Pollutants</a>
+        <a className="nav" href="#assistant" onClick={() => openDashboardSection("assistant")}><MessageCircle size={17}/> AI Assistant</a>
       </nav>
       <div className="nav-actions">
         <div className="search-row nav-search" ref={searchBoxRef}>
@@ -597,11 +630,17 @@ function App() {
             {showNonStationSubnote && <small>Not a neighborhood monitoring station observation.</small>}
           </div>
         </div>
-        <div className="insight-card">
-          <div className="card-heading"><div><span className="section-kicker">MODELLED HOURLY ESTIMATES</span><h3>Next 12 hours</h3></div><span className="mini-icon"><Activity size={17}/></span></div>
+        <CollapsibleSection
+          id="hourly"
+          titleId="hourly-title"
+          className={`insight-card${sections.hourly ? "" : " is-collapsed"}`}
+          expanded={sections.hourly}
+          onToggle={() => toggleDashboardSection("hourly")}
+          header={<><span className="section-toggle-copy"><span className="section-kicker">MODELLED HOURLY ESTIMATES</span><span className="section-title" id="hourly-title">Next 12 hours</span></span><span className="mini-icon"><Activity size={17}/></span></>}
+        >
           <div className="chart-wrap">{chartData.length ? <ResponsiveContainer width="100%" height="100%"><AreaChart data={chartData}><defs><linearGradient id="aqiFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="var(--blue-readable)" stopOpacity={0.2}/><stop offset="100%" stopColor="var(--blue-readable)" stopOpacity={0}/></linearGradient></defs><CartesianGrid stroke="var(--chart-grid)" vertical={false}/><XAxis dataKey="hour" tick={{ fill: "var(--text-muted)", fontSize: 11 }} axisLine={false} tickLine={false}/><YAxis width={32} domain={[0, (maximum: number) => Math.min(500, Math.max(100, Math.ceil(maximum / 50) * 50))]} tick={{ fill: "var(--text-muted)", fontSize: 11 }} axisLine={false} tickLine={false}/><Tooltip contentStyle={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, color: "var(--text)" }} cursor={{stroke:"var(--border-strong)"}}/><Area type="monotone" dataKey="aqi" stroke="var(--blue-readable)" strokeWidth={2.5} fill="url(#aqiFill)" connectNulls/></AreaChart></ResponsiveContainer> : <div className="chart-empty">{loading ? "Loading model forecast…" : error ? "Forecast unavailable because data could not be loaded." : "Hourly model forecast unavailable."}</div>}</div>
           <div className="chart-legend"><span><i/> US AQI forecast</span><span className="muted">Modelled forecast · not a station observation</span></div>
-        </div>
+        </CollapsibleSection>
       </section>
       <GoWindowPanel
         locationLabel={loc.source === "default" ? "Default · Chennai" : loc.label}
@@ -617,6 +656,8 @@ function App() {
         hourly={air?.hourly ?? []}
         timezone={air?.location.timezone ?? null}
         onFind={findBestTime}
+        expanded={sections.gowindow}
+        onToggle={() => toggleDashboardSection("gowindow")}
       />
       <FamilyPanel
         locationLabel={loc.source === "default" ? "Default · Chennai" : loc.label}
@@ -630,18 +671,34 @@ function App() {
         explainLoading={familyExplainLoading}
         explainError={familyExplainError}
         onExplain={explainHousehold}
+        expanded={sections.family}
+        onToggle={() => toggleDashboardSection("family")}
       />
-      <section className="section-block" id="pollutants"><div className="section-header"><div><span className="section-kicker">WHAT'S IN THE AIR</span><h2>Pollutant breakdown</h2></div><span className="muted">Modelled concentration · µg/m³ where applicable</span></div>
+      <CollapsibleSection
+        id="pollutants"
+        titleId="pollutants-title"
+        className="section-block"
+        expanded={sections.pollutants}
+        onToggle={() => toggleDashboardSection("pollutants")}
+        header={<><span className="section-toggle-copy"><span className="section-kicker">WHAT'S IN THE AIR</span><span className="section-title" id="pollutants-title">Pollutant breakdown</span></span><span className="muted">Modelled concentration · µg/m³ where applicable</span></>}
+      >
         <div className="pollutant-grid">
           <Pollutant name="PM2.5" value={air?.pollutants.pm25} unit="µg/m³" icon={<Cloud/>} desc="Fine particles"/>
           <Pollutant name="PM10" value={air?.pollutants.pm10} unit="µg/m³" icon={<Wind/>} desc="Coarse particles"/>
           <Pollutant name="Ozone" value={air?.pollutants.ozone} unit="µg/m³" icon={<Activity/>} desc="Ground-level O₃"/>
           <Pollutant name="Nitrogen dioxide" value={air?.pollutants.nitrogenDioxide} unit="µg/m³" icon={<Cloud/>} desc="Traffic-related gas"/>
         </div>
-      </section>
-      <section className="section-block assistant-section" id="assistant"><div className="section-header"><div><span className="section-kicker">YOUR PERSONAL AIR GUIDE</span><h2>Ask AirSense AI</h2><p className="muted">Grounded in local model estimates and your activity context.</p></div><div className="ai-mark"><Bot size={20}/> AI ASSISTED</div></div>
+      </CollapsibleSection>
+      <CollapsibleSection
+        id="assistant"
+        titleId="assistant-title"
+        className="section-block assistant-section"
+        expanded={sections.assistant}
+        onToggle={() => toggleDashboardSection("assistant")}
+        header={<><span className="section-toggle-copy"><span className="section-kicker">YOUR PERSONAL AIR GUIDE</span><span className="section-title" id="assistant-title">Ask AirSense AI</span><span className="section-summary">Grounded in local model estimates and your activity context.</span></span><span className="ai-mark"><Bot size={20}/> AI ASSISTED</span></>}
+      >
         <div className="assistant-card">
-          <div className="profile-row"><div className="profile-heading"><Bot size={17}/><b>Using the GoWindow activity profile</b></div><a className="profile-link" href="#gowindow">Change activity or profile</a></div>
+          <div className="profile-row"><div className="profile-heading"><Bot size={17}/><b>Using the GoWindow activity profile</b></div><a className="profile-link" href="#gowindow" onClick={() => openDashboardSection("gowindow")}>Change activity or profile</a></div>
           <p className="profile-summary">{profile.activity} · {profile.ageGroup} · {profile.sensitivity}</p>
           <div className="prompt-list">{prompts.map(p => <button key={p} onClick={() => submit(p)} disabled={thinking || !air}>{p}<ArrowUpRight size={13}/></button>)}</div>
           {decision && !locations.length && <div className="decision-card">
@@ -669,10 +726,11 @@ function App() {
           <form className="chat-input" onSubmit={e => {e.preventDefault(); submit();}}><input value={question} onChange={e => setQuestion(e.target.value)} disabled={thinking || !air} placeholder={air ? "Ask about air quality, activities or precautions…" : "Load environmental data to ask a question"} aria-label="Ask AirSense AI"/><button disabled={thinking || !air || !question.trim()} aria-label="Send question">{thinking ? <RefreshCw className="spin" size={17}/> : <Send size={17}/>}</button></form>
           <div className="disclaimer">Guidance is informational, not medical advice. Follow local public-health advisories.</div>
         </div>
-      </section>
+      </CollapsibleSection>
       <div className="privacy"><ShieldCheck size={16}/><div><b>Privacy first</b><small>Location is used for local air data. GPS coordinates are shared directly with BigDataCloud only to name your location, stay in this session, and are never sent to the AI model.</small></div></div>
       <footer><span><Leaf size={14}/> Make every breath count.</span><span>Data: Open-Meteo · Powered by CAMS · <a href="https://open-meteo.com/" target="_blank" rel="noreferrer">Data attribution</a></span></footer>
     </main>
+    <BackToTop />
   </div>;
 }
 function locationTitle(location: AssistantLocation) {
