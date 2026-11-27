@@ -1079,6 +1079,24 @@ function safeClaimReason(error) {
 }
 
 const CONFIGURED_RESPONSE_MIME_TYPE = "application/json";
+// Gemini 3.8 Flash accepts LOW, MEDIUM, and HIGH. MINIMAL returns an API error.
+// thinkingBudget is deprecated on Gemini 3 and can return 400, so it is omitted.
+// LOW is the smallest supported thinking level. The 1024-token default stopped
+// a structured response at 87 characters with finishReason MAX_TOKENS, so
+// structured explanations keep enough output room for the schema and the
+// 900-character explanation after that smaller thought budget.
+const STRUCTURED_THINKING_LEVEL = "LOW";
+const STRUCTURED_OUTPUT_TOKEN_FLOOR = 4096;
+
+function structuredExplanationConfig() {
+  return {
+    responseMimeType: CONFIGURED_RESPONSE_MIME_TYPE,
+    responseSchema: RESPONSE_SCHEMA,
+    temperature: 0.25,
+    maxOutputTokens: Math.max(AI_CONFIG.maxOutputTokens, STRUCTURED_OUTPUT_TOKEN_FLOOR),
+    thinkingConfig: { thinkingLevel: STRUCTURED_THINKING_LEVEL },
+  };
+}
 const FINISH_REASONS = new Set([
   "FINISH_REASON_UNSPECIFIED",
   "STOP",
@@ -1448,10 +1466,7 @@ export async function explainFamilyPlan(plan) {
         contents: [{ role: "user", parts: [{ text: serialized }] }],
         config: {
           systemInstruction: familySystemPrompt(plan, claims),
-          responseMimeType: CONFIGURED_RESPONSE_MIME_TYPE,
-          responseSchema: RESPONSE_SCHEMA,
-          temperature: 0.25,
-          maxOutputTokens: AI_CONFIG.maxOutputTokens,
+          ...structuredExplanationConfig(),
           httpOptions: { timeout: Math.max(1, deadlineAt - Date.now()) },
           abortSignal: controller.signal,
         },
@@ -1539,10 +1554,7 @@ export async function askGemini(question, context, trusted, decision = null, opt
           contents: [{ role: "user", parts: [{ text: userPrompt }] }],
           config: {
             systemInstruction: system,
-            responseMimeType: CONFIGURED_RESPONSE_MIME_TYPE,
-            responseSchema: RESPONSE_SCHEMA,
-            temperature: 0.25,
-            maxOutputTokens: AI_CONFIG.maxOutputTokens,
+            ...structuredExplanationConfig(),
             httpOptions: { timeout: remainingMs },
             abortSignal: controller.signal,
           },

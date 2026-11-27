@@ -47,6 +47,13 @@ class FakeModels {
       return { text: JSON.stringify(mockBehavior.body ?? { ...VALID_STRUCTURED, claimIds: ["us_aqi"] }) };
     }
     if (b === "invalid") return { text: "not json at all" };
+    if (b === "truncated") {
+      const partial = "{\"recommendation\":\"avoid\",\"explanation\":\"The activity";
+      return {
+        text: partial,
+        candidates: [{ finishReason: "MAX_TOKENS", content: { parts: [{ text: partial }] } }],
+      };
+    }
     if (b === "contradiction") return { text: JSON.stringify({ ...VALID_STRUCTURED, recommendation: "suitable", summary: "Conditions are safe and favorable for a run." }) };
     if (b === "semanticContradiction") return { text: JSON.stringify({ ...VALID_STRUCTURED, recommendation: "suitable", summary: "Nothing in these conditions should alter the planned outing." }) };
     if (b === "invalidRecommendation") return { text: JSON.stringify({ ...VALID_STRUCTURED, recommendation: "go_ahead" }) };
@@ -142,6 +149,33 @@ test("valid claim IDs and the matching recommendation are assembled from server 
   assert.match(result.evidence.join(" "), /increased the exposure score by 0\.5 points/);
   assert.doesNotMatch(result.answer, /0\.5|favorable wind/i);
   assert.equal(deterministicContext.answer, buildDeterministicAnswer(air, decision));
+  assert.equal(lastGenerateArgs.config.responseMimeType, "application/json");
+  assert.deepEqual(lastGenerateArgs.config.responseSchema.required, ["recommendation", "claimIds", "explanation"]);
+  assert.deepEqual(lastGenerateArgs.config.thinkingConfig, { thinkingLevel: "LOW" });
+  assert.equal(Object.hasOwn(lastGenerateArgs.config.thinkingConfig, "thinkingBudget"), false);
+  assert.equal(lastGenerateArgs.config.maxOutputTokens, 4096);
+  assert.equal(lastGenerateArgs.config.temperature, 0.25);
+  assert.equal(lastClassifierArgs.config.maxOutputTokens, 256);
+  assert.equal(lastClassifierArgs.config.thinkingConfig, undefined);
+});
+
+test("truncated assistant JSON falls back and an unsafe recommendation is still rejected", async () => {
+  const decision = buildExposureDecision(trusted, profile);
+  mockBehavior = { type: "truncated" };
+  const truncated = await askGemini("Can I run?", context, trusted, decision);
+  assert.equal(truncated.mode, "rules-fallback");
+  assert.equal(truncated.answer, context.answer);
+  assert.equal(truncated.structured, null);
+  assert.equal(truncated.decision, decision);
+  assert.equal(lastGenerateArgs.config.thinkingConfig.thinkingLevel, "LOW");
+  assert.equal(lastGenerateArgs.config.maxOutputTokens, 4096);
+
+  mockBehavior = { type: "contradiction" };
+  const unsafe = await askGemini("Can I run?", context, trusted, decision);
+  assert.equal(unsafe.mode, "rules-fallback");
+  assert.equal(unsafe.answer, context.answer);
+  assert.equal(unsafe.structured, null);
+  assert.equal(unsafe.decision, decision);
 });
 
 test("invalid model response falls back to deterministic", async () => {

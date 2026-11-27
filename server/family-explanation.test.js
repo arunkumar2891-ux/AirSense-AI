@@ -96,12 +96,22 @@ test.after(() => {
   _setClientFactory(null);
 });
 
+function assertStructuredExplanationConfig(config) {
+  assert.equal(config.responseMimeType, "application/json");
+  assert.deepEqual(config.responseSchema.required, ["recommendation", "claimIds", "explanation"]);
+  assert.deepEqual(config.thinkingConfig, { thinkingLevel: "LOW" });
+  assert.equal(Object.hasOwn(config.thinkingConfig, "thinkingBudget"), false);
+  assert.equal(config.maxOutputTokens, 4096);
+  assert.equal(config.temperature, 0.25);
+}
+
 test("a configured model can explain the deterministic family plan", async () => {
   const household = plan();
   const result = await explainFamilyPlan(household);
   assert.equal(result.mode, "ai");
   assert.equal(result.text, validExplanation);
   assert.equal(calls.length, 1);
+  assertStructuredExplanationConfig(calls[0].config);
   assert.equal(household.decision.activityRecommendation, "avoid");
   const prompt = calls[0].contents[0].parts[0].text;
   assert.match(prompt, /Explain the household air quality exposure plan/);
@@ -197,8 +207,36 @@ test("a non-JSON family response logs response metadata without model text", asy
   assert.equal(logged.includes("private thought"), false);
   assert.equal(logged.includes("hidden provider message"), false);
   assert.equal(logged.includes("13.0827"), false);
-  assert.equal(calls[0].config.responseMimeType, "application/json");
-  assert.ok(calls[0].config.responseSchema);
+  assertStructuredExplanationConfig(calls[0].config);
+});
+
+test("incomplete JSON from MAX_TOKENS keeps the deterministic family explanation", async () => {
+  const household = plan();
+  const partial = "{\"recommendation\":\"avoid\",\"claimIds\":[\"current_exposure_decision\"],\"explanation\":\"The household";
+  behavior = {
+    type: "diagnostics",
+    response: {
+      text: partial,
+      candidates: [{ finishReason: "MAX_TOKENS", content: { parts: [{ text: partial }] } }],
+    },
+  };
+  const result = await explainFamilyPlan(household);
+  assert.equal(result.mode, "rules-fallback");
+  assert.equal(result.text, familyRulesExplanation(household));
+  assert.equal(household.decision.activityRecommendation, "avoid");
+  assert.equal(household.schedule.status, "no_suitable_window");
+  assertStructuredExplanationConfig(calls[0].config);
+});
+
+test("an unsafe family explanation is still rejected with the structured generation settings", async () => {
+  const household = plan();
+  behavior = { type: "text", body: modelBody(`${validExplanation} Children can play outside.`) };
+  const result = await explainFamilyPlan(household);
+  assert.equal(result.mode, "rules-fallback");
+  assert.equal(result.text, familyRulesExplanation(household));
+  assert.equal(household.decision.activityRecommendation, "avoid");
+  assert.equal(household.schedule.status, "no_suitable_window");
+  assertStructuredExplanationConfig(calls[0].config);
 });
 
 test("contradictory, child, emissions, indoor, and medical explanations are discarded", async () => {
