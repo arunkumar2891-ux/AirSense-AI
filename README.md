@@ -2,13 +2,15 @@
 
 **Understand the air you have. Choose a time that fits the activity.**
 
-AirSense AI is a deterministic outdoor-exposure assistant. It turns modelled air-quality and weather data into an activity-specific recommendation for right now, and it uses the same rules to find later forecast windows for a chosen activity and duration. An optional Gemini call can explain the user's question. It cannot replace the decision or the measurements.
+AirSense AI is an urban air-quality assistant for families and communities. It assesses outdoor exposure from modelled environmental data and keeps that decision in a rule engine. The current reading answers what to do now. GoWindow searches later forecast hours for a suitable outdoor activity window. The Family Assistant plans one household outing, including child-aware outdoor play, and gives separate recommendations for walking and cycling. An optional Gemini call can explain a question or a family plan. Every explanation is checked against the engine. A failed check falls back to the deterministic text and cannot replace the decision or the measurements.
 
 ## Project overview
 
-People usually see one AQI number and still have to decide whether a run, a commute, or outdoor play makes sense. AirSense keeps that decision in a rule engine. The current reading answers "what should I do now?" GoWindow answers "when, in the next 12 hours, does this activity have a long enough suitable interval?" A better hour later does not change the current recommendation.
+People usually see one AQI number and still have to decide whether a run, a commute, or outdoor play makes sense. AirSense keeps that decision in a rule engine. The current reading answers "what should I do now?" GoWindow answers "when, in the next 12 hours, does this activity have a long enough suitable interval?" A better hour later does not change the current recommendation. The Family Assistant answers a household question with the same engine: one shared outing, plus walking and cycling judged on their own.
 
-The dashboard opens on Chennai without an account or a location grant. Search, optional browser location, activity, age group, and sensitivity change the same deterministic result. Gemini is optional. With no API key, the assistant still returns the engine's recommendation.
+The dashboard opens on Chennai without an account or a location grant. Search, optional browser location, activity, age group, and sensitivity change the same deterministic result. Gemini is optional. With no API key, the assistant and the Family Assistant still return the engine's recommendation.
+
+The current modelled air quality, weather, location, and alert banners stay open. The hourly forecast, GoWindow, Family air plan, pollutant breakdown, and Ask AirSense AI sections start collapsed. Each header opens and closes that section, and the choice is kept in `sessionStorage` for the browser tab under `airsense.sections`. A floating Back to top button appears after the page has scrolled 480 pixels. It scrolls smoothly, or jumps when the browser asks for reduced motion.
 
 ## Problem
 
@@ -22,6 +24,7 @@ An AQI category does not say whether a particular outdoor activity is suitable, 
 - **Missing data stays missing.** A missing US AQI is unavailable, not clean. Missing PM2.5, missing weather, and conflicting duplicate hours are disclosed and are not treated as favorable.
 - **US AQI stays on the US scale.** European AQI is requested from the provider only so it can be ignored. It is never displayed or converted.
 - **Time preferences filter windows after the safety decision.** Morning, afternoon, evening, and daytime do not relax an exposure threshold.
+- **A household does not get a second score.** Young children and older children both use the existing child profile. Walking and cycling are separate engine results. An adult result is not permission for a child.
 
 ## Data sources and limitations
 
@@ -41,7 +44,20 @@ Resolution depends on what the provider identifies:
 - Inside the envelope, a provider `model` or `domain` of `cams_europe` or `cams_global` uses that model's documented resolution. CAMS Europe's documented grid is about 0.1°, approximately 11 km.
 - Inside the envelope, when the provider does not identify the serving domain, AirSense does not choose a resolution. The European and global models can both be in use, so the European resolution stays unverified.
 
-Guidance is informational and is not medical advice. Local public-health advisories take precedence. Alerts, saved profiles, multi-stop routes, and long-term personal exposure tracking are not part of this demo.
+Guidance is informational and is not medical advice or a treatment recommendation. AirSense does not diagnose anyone. Local public-health advisories take precedence. Alerts, saved profiles, multi-stop routes, and long-term personal exposure tracking are not part of this demo.
+
+## Safety and limitations
+
+The current exposure assessment and a future GoWindow schedule answer different questions. The overview and the Family Assistant's current decision use the current air reading and its retrieval time. GoWindow classifies later forecast hours. A suitable window does not make the current recommendation more favorable, and the current recommendation does not rewrite a later hour.
+
+Missing or stale data stays unfavorable. A missing US AQI is unavailable, not clean. Stale or unknown air data returns `insufficient_data` for the current decision. Stale or unknown air or weather data returns `insufficient_data` for a GoWindow schedule and does not invent a window. The same rule applies to the household outing, walking, and cycling.
+
+The Family Assistant also keeps these limits:
+
+- Indoor air quality is not measured. The plan says so, and ventilation guidance follows the outdoor decision. It does not report an indoor concentration.
+- Emissions guidance is qualitative. The plan sets `emissionsSavingsQuantified` to false and does not calculate a saving.
+- No household field accepts a name, date of birth, address, or medical history. Sensitivity uses the existing exposure profiles.
+- The safety decision stays with the exposure engine. An explanation describes the plan. It does not choose the recommendation, the schedule, or the walking and cycling results.
 
 ## Freshness policy
 
@@ -141,6 +157,51 @@ A window is inside a preference only when its start and end both fall inside tha
 
 Each window includes US AQI and PM2.5 ranges when known, weather ranges, a ranking explanation, limitations, and retrieval freshness. The planning timeline draws the next 12 local hours and the windows the server returned. Hour cells are not themselves recommendations.
 
+## Family Assistant
+
+The Family Assistant builds one household plan from the selected location. The browser sends coordinates and the household. It does not send air or weather readings, and extra fields are rejected. The server fetches the forecast itself and runs the same exposure engine used everywhere else.
+
+A household lists age-band counts, one sensitivity, up to four routines, and one shared outing of 15 to 180 minutes. Age bands are `young_child`, `older_child`, `adult`, and `older_adult`. Both child bands use the engine's child profile. There is no separate child score. When a child is present, the shared outing is children's outdoor play. An adult-only household uses the first configured routine in the existing priority order. Commuting, when selected, is an adult-only result and does not apply to children.
+
+Walking and cycling are independent of that outing. Walking is scored as `daily activities` for the governing profile. Cycling is scored as `cycling` for the same profile. Each is eligible only when its own recommendation is `suitable` or `caution`. `avoid` and `insufficient_data` are not eligible. A less restrictive adult result is recorded separately and is not the household decision.
+
+Every plan reports indoor air as not measured and emissions as qualitative. At-home guidance, routine recommendations, and short explanations of why those actions can help are included from the same plan. Missing or stale data does not turn that guidance into a favorable outing.
+
+### Explain using AI
+
+Updating the family plan asks for the deterministic plan. The dashboard shows the household decision, activity recommendations, and schedule, and it does not show an explanation yet. **Explain using AI** sends the same household with `explain: true`.
+
+The explanation object has only `mode` and `text`:
+
+| Mode | What the dashboard shows |
+|---|---|
+| `ai` | The accepted Gemini text, labelled **AI-generated**. |
+| `rules` | The deterministic explanation, with no origin label. This is also the result when `AI_API_KEY` is unset, and Gemini is not called. |
+| `rules-fallback` | The same deterministic explanation, with no origin label. The explanation was requested, but it was not accepted: the provider call failed, the reply failed validation, or the local gate declined it before Gemini. |
+
+The interface does not badge the deterministic text as AI-generated. Beneath a shown explanation, the dashboard says the safety decision stays with the exposure engine. A failed network request leaves the plan in place, reports that the AI explanation is unavailable, and does not substitute a local explanation. Changing the household or updating the plan clears the explanation that was on screen. The family explanation is one Gemini attempt. It does not retry.
+
+### Request
+
+```http
+POST /api/family-plan
+Content-Type: application/json
+
+{
+  "latitude": 13.0827,
+  "longitude": 80.2707,
+  "explain": false,
+  "household": {
+    "members": [{ "ageBand": "young_child", "count": 1 }],
+    "sensitivity": "general",
+    "routines": ["children's outdoor play"],
+    "outing": { "durationMinutes": 45, "timePreference": "daytime" }
+  }
+}
+```
+
+`explain` may be omitted. Only `true` asks Gemini to explain the plan the engine already built. Invalid input returns HTTP 400 and does not call the provider. A forecast timeout returns HTTP 504, and another forecast failure returns HTTP 502, both with `Forecast data is temporarily unavailable.` The default limit is 30 family-plan requests per minute per client IP, separate from GoWindow and the assistant.
+
 ## Gemini architecture
 
 An obvious instruction override, prompt extraction, or credential request is declined before Gemini is called. The same local gate also recognizes clearly environmental, clearly unrelated, and ambiguous questions. It runs when no API key is configured and whenever the Gemini classifier fails, so an unrelated question is not answered with the exposure paragraph. Ambiguous questions receive a fixed request for a more specific environmental question.
@@ -213,7 +274,7 @@ API protections:
 - Helmet security headers. Browser connections are limited to this origin and `https://api.bigdatacloud.net`.
 - JSON bodies are limited to 30 KB.
 - Production (`NODE_ENV=production`) allows same-origin requests and origins listed in `ALLOWED_ORIGINS`. Development allows local origins so the Vite server can call the API.
-- Default per-IP limits are 60 air-quality requests per minute, 60 GoWindow requests per minute, 30 geocoding requests per minute, and 20 assistant requests per minute. The air-quality and GoWindow limits are separate. `/api/health` is not rate-limited.
+- Default per-IP limits are 60 air-quality requests per minute, 60 GoWindow requests per minute, 30 family-plan requests per minute, 30 geocoding requests per minute, and 20 assistant requests per minute. The air-quality, GoWindow, and family-plan limits are separate. `/api/health` is not rate-limited.
 - Upstream responses are cached in a 500-entry LRU. Environmental responses last 10 minutes. Geocoding responses last 24 hours. Concurrent requests for the same cached URL share one upstream call.
 - Provider failures return a timeout or unavailable error. They do not invent a reading.
 
@@ -228,6 +289,7 @@ Express
   |-- GET  /api/geocode         city search
   |-- GET  /api/reverse-geocode generic GPS label if the browser lookup fails
   |-- POST /api/gowindow        forecast windows
+  |-- POST /api/family-plan     household plan, then an optional validated explanation
   |-- POST /api/assistant       deterministic decision and trace, then optional Gemini explanation
   |-- GET  /api/health
   v
@@ -235,18 +297,23 @@ Open-Meteo air quality and forecast
   v
 server/logic.js  ->  recommendation
 server/gowindow.js  ->  window status
+server/family-plan.js  ->  household decision, schedule, walking, and cycling
+server/family-guidance.js  ->  indoor, routine, and qualitative emissions guidance
 server/gemini.js  ->  validated explanation plus claim IDs, or rules / rules-fallback
 ```
 
 In production, Express serves the Vite build from `dist/` and the API on the same origin. The client calls relative `/api` routes, so the built frontend does not embed an API host. Development runs Vite at `http://localhost:5173` and proxies `/api` to `http://localhost:10000`.
 
-## Demo
+## Demo walkthrough
 
 1. Install and start the app with the commands in [Run locally](#run-locally). Leave `AI_API_KEY` empty for the deterministic path.
-2. Open `http://localhost:5173`. Chennai loads without granting location. The overview shows a modelled US AQI estimate, retrieval timing, and activity guidance.
-3. Change activity, age group, or sensitivity and ask the assistant a short question. The recommendation matches the exposure engine. With no key, the response mode is `rules`.
-4. Open GoWindow, keep the daytime preference, choose a duration from 15 to 180 minutes, and request windows. Compare a returned window with the current overview: the window does not rewrite the current recommendation.
-5. Deny location, or search another city, and confirm the dashboard names the source of the place. A failed lookup stays on an honest unavailable state rather than a fabricated reading.
+2. Open `http://localhost:5173`. Chennai loads without granting location. The overview shows a modelled US AQI estimate, retrieval timing, and activity guidance. The hourly forecast, GoWindow, Family, pollutants, and assistant sections are collapsed.
+3. Open GoWindow from its header or the navigation link. Keep the daytime preference, choose a duration from 15 to 180 minutes, and request windows. Compare a returned window with the current overview: the window does not rewrite the current recommendation.
+4. Open Family air plan. The default household is one young child, children's outdoor play, 45 minutes, and daytime. Choose **Update family plan**. The decision, outing windows, and walking and cycling results appear. No explanation is shown yet.
+5. Choose **Explain using AI**. With no API key, the deterministic explanation appears without an origin label. With a key, an accepted reply is labelled **AI-generated**. A reply that fails validation is replaced by the deterministic explanation and is not labelled as AI-generated. The household decision stays the one the exposure engine returned.
+6. Scroll down until **Back to top** appears at the bottom-right, then use it to return to the overview. Collapse a section you opened. Reload the tab and confirm that section choice is still there.
+7. Change activity, age group, or sensitivity and ask the assistant a short question. The recommendation matches the exposure engine. With no key, the response mode is `rules`.
+8. Deny location, or search another city, and confirm the dashboard names the source of the place. A failed lookup stays on an honest unavailable state rather than a fabricated reading.
 
 This repository does not include demo screenshots.
 
@@ -300,13 +367,15 @@ Render supplies `PORT`. The server binds `0.0.0.0`. Optional rate-limit, cache, 
 
 ## Repository compliance checklist
 
-- [ ] Public GitHub repository
-- [ ] Exactly one branch (`main`)
-- [ ] Repository under 10 MB, with `node_modules` and `dist` uncommitted
-- [ ] `.env` and API keys excluded
-- [ ] `npm test` passes
-- [ ] `npm run build` passes
-- [ ] README included
+Observed on `main` at `3729fa1` during the 27 November 2026 repository audit, before this README edit. Application code was not changed afterward.
+
+- [x] Public GitHub repository
+- [x] Exactly one branch (`main`)
+- [x] Repository under 10 MB. GitHub reported 885 KB. `node_modules` and `dist` are uncommitted
+- [x] `.env` and API keys excluded. `.env.example` has an empty `AI_API_KEY`
+- [x] `npm test` passes. `npm run check` passed on this application tree before the README edit
+- [x] `npm run build` passes, as part of that same `npm run check`
+- [x] README included
 - [ ] Demo screenshots included
 
 No screenshot files are in this repository, so the screenshot item stays open.
