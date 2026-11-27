@@ -1,11 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Activity, ArrowUpRight, Bot, Clock, Cloud, Compass, Crosshair, Leaf, MapPin, MessageCircle, RefreshCw, Search, Send, ShieldCheck, Wind, X } from "lucide-react";
+import { Activity, ArrowUpRight, Bot, Clock, Cloud, Compass, Crosshair, Leaf, MapPin, MessageCircle, RefreshCw, Search, Send, ShieldCheck, Users, Wind, X } from "lucide-react";
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
-import { askAssistant, findGoWindow, getAirQuality, reverseGeocode, searchLocations } from "./api";
-import type { AirData, AssistantLocation, DecisionTrace, ExposureDecision, GoWindowResponse, GoWindowTimePreference, LocationResult, Profile, WindHypothetical } from "./types";
+import { askAssistant, findGoWindow, getAirQuality, requestFamilyPlan, reverseGeocode, searchLocations } from "./api";
+import type { AirData, AssistantLocation, DecisionTrace, ExposureDecision, FamilyPlanResponse, GoWindowResponse, GoWindowTimePreference, LocationResult, Profile, WindHypothetical } from "./types";
 import { describeCurrentActivityGuidance, describeWindUse, formatReportedWindSpeed, formatSourceDisclosure, formatTimingDisclosure, getAqiPresentation, getFreshnessPresentation, isLatestRequest, shouldApplyGpsResult, US_AQI_CATEGORIES } from "./reliability";
 import { buildGoWindowRequest, DEFAULT_GO_WINDOW_DURATION, DEFAULT_TIME_PREFERENCE, goWindowRequestKey } from "./gowindow";
+import { FAMILY_STORAGE_KEY, buildFamilyPlanRequest, familyPlanRequestKey, loadFamilyHousehold, serializeFamilyHousehold, type FamilyDraft } from "./family";
 import GoWindowPanel from "./GoWindowPanel";
+import FamilyPanel from "./FamilyPanel";
 import ThemeSelector from "./ThemeSelector";
 
 const fallbackCity = { name: "Chennai, Tamil Nadu, India", lat: 13.0827, lon: 80.2707 };
@@ -86,6 +88,15 @@ function App() {
   const [scheduleKey, setScheduleKey] = useState("");
   const [scheduleLoading, setScheduleLoading] = useState(false);
   const [scheduleError, setScheduleError] = useState("");
+  const [household, setHousehold] = useState<FamilyDraft>(() => {
+    try { return loadFamilyHousehold(sessionStorage); } catch { return loadFamilyHousehold(null); }
+  });
+  const [familyPlan, setFamilyPlan] = useState<FamilyPlanResponse | null>(null);
+  const [familyPlanKey, setFamilyPlanKey] = useState("");
+  const [familyLoading, setFamilyLoading] = useState(false);
+  const [familyError, setFamilyError] = useState("");
+  const [familyExplainLoading, setFamilyExplainLoading] = useState(false);
+  const [familyExplainError, setFamilyExplainError] = useState("");
   const [clockNow, setClockNow] = useState(() => Date.now());
 
   useEffect(() => {
@@ -115,6 +126,10 @@ function App() {
   const goWindowRequestRef = useRef(0);
   const goWindowAbortRef = useRef<AbortController | null>(null);
   const goWindowPendingRef = useRef(false);
+  const familyRequestRef = useRef(0);
+  const familyAbortRef = useRef<AbortController | null>(null);
+  const familyPendingRef = useRef(false);
+  const familyExplainPendingRef = useRef(false);
 
   async function refresh(lat = loc.lat, lon = loc.lon) {
     const requestId = ++airRequestRef.current;
@@ -232,6 +247,7 @@ function App() {
     searchAbortRef.current?.abort();
     assistantAbortRef.current?.abort();
     goWindowAbortRef.current?.abort();
+    familyAbortRef.current?.abort();
   }, []);
 
   const scheduleRequestKey = goWindowRequestKey(loc, profile, duration, timePreference);
@@ -244,6 +260,20 @@ function App() {
     setScheduleError("");
     setScheduleLoading(false);
   }, [scheduleRequestKey]);
+
+  const familySelectionKey = familyPlanRequestKey(loc, household);
+  useEffect(() => {
+    familyAbortRef.current?.abort();
+    familyRequestRef.current += 1;
+    familyPendingRef.current = false;
+    setFamilyPlan(null);
+    setFamilyPlanKey("");
+    setFamilyError("");
+    setFamilyLoading(false);
+    familyExplainPendingRef.current = false;
+    setFamilyExplainLoading(false);
+    setFamilyExplainError("");
+  }, [familySelectionKey]);
 
   useEffect(() => {
     if (!thinking && (answer || assistantError)) assistantResultRef.current?.focus();
@@ -367,6 +397,76 @@ function App() {
     }
   }
 
+  function updateHousehold(next: FamilyDraft) {
+    setHousehold(next);
+    try {
+      const stored = serializeFamilyHousehold(next);
+      if (stored) sessionStorage.setItem(FAMILY_STORAGE_KEY, stored);
+    } catch { /* storage unavailable — the household stays in memory */ }
+  }
+
+  async function planHousehold() {
+    if (familyLoading || familyPendingRef.current) return;
+    const request = buildFamilyPlanRequest(loc, household);
+    if (!request) return;
+    familyPendingRef.current = true;
+    familyExplainPendingRef.current = false;
+    const requestId = ++familyRequestRef.current;
+    const requestKey = JSON.stringify(request);
+    familyAbortRef.current?.abort();
+    const controller = new AbortController();
+    familyAbortRef.current = controller;
+    setFamilyLoading(true);
+    setFamilyExplainLoading(false);
+    setFamilyExplainError("");
+    setFamilyPlan(null);
+    setFamilyPlanKey("");
+    setFamilyError("");
+    try {
+      const result = await requestFamilyPlan(request, controller.signal);
+      if (!isLatestRequest(requestId, familyRequestRef.current)) return;
+      setFamilyPlan(result);
+      setFamilyPlanKey(requestKey);
+    } catch (e) {
+      if (controller.signal.aborted || !isLatestRequest(requestId, familyRequestRef.current)) return;
+      setFamilyError(e instanceof Error ? e.message : "Family plan request failed.");
+    } finally {
+      if (isLatestRequest(requestId, familyRequestRef.current)) {
+        familyPendingRef.current = false;
+        setFamilyLoading(false);
+      }
+    }
+  }
+
+  async function explainHousehold() {
+    if (familyExplainLoading || familyExplainPendingRef.current || familyLoading || familyPendingRef.current) return;
+    const request = buildFamilyPlanRequest(loc, household, true);
+    if (!request) return;
+    familyExplainPendingRef.current = true;
+    const requestId = ++familyRequestRef.current;
+    const requestKey = familyPlanRequestKey(loc, household);
+    familyAbortRef.current?.abort();
+    const controller = new AbortController();
+    familyAbortRef.current = controller;
+    setFamilyExplainLoading(true);
+    setFamilyExplainError("");
+    try {
+      const result = await requestFamilyPlan(request, controller.signal);
+      if (!isLatestRequest(requestId, familyRequestRef.current)) return;
+      if (familyPlanRequestKey(loc, household) !== requestKey) return;
+      setFamilyPlan(result);
+      setFamilyPlanKey(requestKey);
+    } catch (e) {
+      if (controller.signal.aborted || !isLatestRequest(requestId, familyRequestRef.current)) return;
+      setFamilyExplainError(e instanceof Error ? e.message : "AI explanation unavailable.");
+    } finally {
+      if (isLatestRequest(requestId, familyRequestRef.current)) {
+        familyExplainPendingRef.current = false;
+        setFamilyExplainLoading(false);
+      }
+    }
+  }
+
   const aqi = air?.aqi;
   const aqiPresentation = getAqiPresentation(aqi);
   const forecastValidAt = air?.forecastValidAt ?? air?.observedAt ?? null;
@@ -406,6 +506,7 @@ function App() {
       <nav className="primary-nav" aria-label="Dashboard sections">
         <a className="nav" href="#overview"><Activity size={17}/> Overview</a>
         <a className="nav" href="#gowindow"><Clock size={17}/> GoWindow</a>
+        <a className="nav" href="#family"><Users size={17}/> Family</a>
         <a className="nav" href="#pollutants"><Compass size={17}/> Pollutants</a>
         <a className="nav" href="#assistant"><MessageCircle size={17}/> AI Assistant</a>
       </nav>
@@ -503,6 +604,19 @@ function App() {
         hourly={air?.hourly ?? []}
         timezone={air?.location.timezone ?? null}
         onFind={findBestTime}
+      />
+      <FamilyPanel
+        locationLabel={loc.source === "default" ? "Default · Chennai" : loc.label}
+        household={household}
+        onHouseholdChange={updateHousehold}
+        loading={familyLoading && familyPlanKey === ""}
+        error={familyError}
+        result={familyPlanKey === familySelectionKey ? familyPlan : null}
+        now={clockNow}
+        onPlan={planHousehold}
+        explainLoading={familyExplainLoading}
+        explainError={familyExplainError}
+        onExplain={explainHousehold}
       />
       <section className="section-block" id="pollutants"><div className="section-header"><div><span className="section-kicker">WHAT'S IN THE AIR</span><h2>Pollutant breakdown</h2></div><span className="muted">Modelled concentration · µg/m³ where applicable</span></div>
         <div className="pollutant-grid">

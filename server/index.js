@@ -5,10 +5,12 @@ import helmet from "helmet";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { getAQIStatus, buildRecommendationContext, buildExposureDecision, parseWindHypothetical, buildWindHypothetical } from "./logic.js";
-import { askGemini, classifyLocalDomain, detectPromptInjection, normalizeQuestion } from "./gemini.js";
+import { askGemini, classifyLocalDomain, detectPromptInjection, explainFamilyPlan, normalizeQuestion } from "./gemini.js";
 import { buildComparison, clarificationAnswer, describeLocationAnswer, extractLocationIntent, geocodeQueries, judgeGeocode, placeLabel } from "./locations.js";
 import { providerTimeToEpochMs, providerTimeToIso, selectCurrentAndFutureHours } from "./time.js";
 import { findGoWindows, TIME_PREFERENCES } from "./gowindow.js";
+import { buildHouseholdPlan, validateHouseholdPlan } from "./family-plan.js";
+import { buildFamilyGuidance, familyRulesExplanation } from "./family-guidance.js";
 import { buildForecastMetadata } from "./metadata.js";
 import { BoundedTTLCache, normalizeCoordinates } from "./cache.js";
 import { createRateLimiter } from "./rate-limit.js";
@@ -406,6 +408,56 @@ async function fetchTrustedForecast(latitude, longitude) {
   });
 }
 
+function currentReadingFromRecords(air, airRecord, weatherRecord) {
+  const current = air?.current || {};
+  const rawAqi = current.us_aqi == null ? NaN : Number(current.us_aqi);
+  const aqi = Number.isFinite(rawAqi) && rawAqi >= 0 ? rawAqi : null;
+  const weatherCurrent = weatherRecord?.data?.current;
+  const weatherUsable = usableCurrentObservation(weatherCurrent);
+  const metadata = buildForecastMetadata({ air, retrievedAt: airRecord?.retrievedAt ?? null });
+  return {
+    aqi,
+    aqiScale: "US AQI",
+    pollutants: {
+      pm25: finiteNonNegative(current.pm2_5),
+      pm10: finiteNonNegative(current.pm10),
+      ozone: finiteNonNegative(current.ozone),
+      nitrogenDioxide: finiteNonNegative(current.nitrogen_dioxide),
+      carbonMonoxide: finiteNonNegative(current.carbon_monoxide),
+      sulphurDioxide: finiteNonNegative(current.sulphur_dioxide),
+    },
+    weather: weatherUsable ? weatherCurrent : {},
+    weatherRetrievedAt: weatherUsable ? weatherRecord.retrievedAt ?? null : null,
+    forecastValidAt: providerTimeToIso(current.time, air?.utc_offset_seconds),
+    retrievedAt: metadata.timestamps.retrievedAt,
+    modelInitializedAt: metadata.timestamps.modelInitializedAt,
+    metadata,
+    // Later hours stay on the forecast. They are not a substitute current reading.
+    hourly: [],
+  };
+}
+
+// One air request and one forecast-weather request. Every household decision
+// reads this same object. The cache and single-flight loader are the existing ones.
+async function fetchTrustedHouseholdForecast(latitude, longitude) {
+  const normalized = normalizeCoordinates(latitude, longitude);
+  const { airUrl } = buildAirUrls(normalized.latitude, normalized.longitude);
+  const weatherUrl = buildForecastWeatherUrl(normalized.latitude, normalized.longitude);
+  const [airRecord, weatherRecord] = await Promise.all([
+    cachedFetchRecord(airUrl),
+    loadCachedRecord(cache, weatherUrl, ENVIRONMENT_CACHE_TTL_MS, usableForecastWeatherRecord),
+  ]);
+  const air = airRecord?.data;
+  const weather = weatherRecord?.data;
+  if (!plainObject(air) || !plainObject(weather)) throw new Error("Invalid provider response shape");
+  const forecast = toGoWindowForecast(air, weather, {
+    airRetrievedAt: airRecord.retrievedAt,
+    weatherRetrievedAt: weatherRecord.retrievedAt,
+  });
+  forecast.current = currentReadingFromRecords(air, airRecord, weatherRecord);
+  return forecast;
+}
+
 // ---------- Input validation ----------
 const ALLOWED_ACTIVITIES = new Set(["running", "cycling", "outdoor workout", "sports", "commuting", "daily activities", "children's outdoor play"]);
 const ALLOWED_AGE_GROUPS = new Set(["adult", "child", "older adult"]);
@@ -508,6 +560,23 @@ function validateGoWindowInput(body) {
   };
 }
 
+const FAMILY_PLAN_KEYS = new Set(["latitude", "longitude", "household", "explain"]);
+
+function validateFamilyPlanInput(body) {
+  if (!plainObject(body)) return { error: "Request body must be a JSON object." };
+  if (Object.keys(body).some((key) => !FAMILY_PLAN_KEYS.has(key))) {
+    return { error: "Request contains an unsupported field." };
+  }
+  if (body.explain !== undefined && typeof body.explain !== "boolean") {
+    return { error: "Explain must be true or false." };
+  }
+  const coords = validateCoordinates(body.latitude, body.longitude);
+  if (!coords) return { error: "Valid latitude and longitude are required." };
+  const household = validateHouseholdPlan(body.household);
+  if (household.error) return household;
+  return { value: { ...coords, household: household.value, explain: body.explain === true } };
+}
+
 // ---------- Rate limiting (bounded, in-memory, per trusted client IP) ----------
 const RATE_LIMIT_WINDOW_MS = Math.max(1000, Number(process.env.ASSISTANT_RATE_LIMIT_WINDOW_MS) || 60000);
 const RATE_LIMIT_MAX = Math.max(1, Number(process.env.ASSISTANT_RATE_LIMIT_MAX) || 20);
@@ -536,6 +605,11 @@ const rateLimiters = {
     name: "activity-window",
     windowMs: process.env.DATA_RATE_LIMIT_WINDOW_MS || 60000,
     max: process.env.DATA_RATE_LIMIT_MAX || 60,
+  }),
+  familyPlan: createRateLimiter({
+    name: "family-plan",
+    windowMs: process.env.FAMILY_PLAN_RATE_LIMIT_WINDOW_MS || 60000,
+    max: process.env.FAMILY_PLAN_RATE_LIMIT_MAX || 30,
   }),
 };
 const rateBuckets = rateLimiters.assistant.buckets;
@@ -803,6 +877,73 @@ app.post("/api/assistant", rateLimiters.assistant.middleware, async (req, res) =
   const decision = buildExposureDecision(trusted, profile, Date.now());
   const { result, hypothetical } = await answerForTrusted(question, profile, trusted, decision);
   return res.json(assistantPayload(result, decision, hypothetical));
+});
+
+// POST /api/family-plan
+// Trusted forecast is fetched once. Client readings and free-text prompts are
+// rejected. An optional explanation cannot change the deterministic plan.
+app.post("/api/family-plan", rateLimiters.familyPlan.middleware, async (req, res) => {
+  const parsed = validateFamilyPlanInput(req.body);
+  if (parsed.error) return res.status(400).json({ error: parsed.error });
+  const { latitude, longitude, household, explain } = parsed.value;
+  try {
+    const forecast = await fetchTrustedHouseholdForecast(latitude, longitude);
+    const plan = buildHouseholdPlan({ forecast, household, now: Date.now() });
+    if (!plan.ok) return res.status(400).json({ error: plan.error });
+    const guidance = buildFamilyGuidance({
+      recommendation: plan.decision?.activityRecommendation,
+      freshnessState: plan.decision?.dataFreshness?.state,
+      scheduleStatus: plan.schedule?.status,
+      suitableWindowCount: Array.isArray(plan.schedule?.windows) ? plan.schedule.windows.length : 0,
+      routines: household.routines,
+      childPresent: plan.basis?.childPresent === true,
+      walking: {
+        eligible: plan.activeTravel?.walking?.eligible === true,
+        recommendation: plan.activeTravel?.walking?.decision?.activityRecommendation,
+      },
+      cycling: {
+        eligible: plan.activeTravel?.cycling?.eligible === true,
+        recommendation: plan.activeTravel?.cycling?.decision?.activityRecommendation,
+      },
+    });
+    const payload = {
+      ok: true,
+      governingProfile: plan.governingProfile,
+      basis: plan.basis,
+      decision: plan.decision,
+      schedule: plan.schedule,
+      adultOnlyCommute: plan.adultOnlyCommute,
+      activeTravel: plan.activeTravel,
+      sentences: plan.sentences,
+      indoorAirUnmeasured: plan.indoorAirUnmeasured,
+      emissionsSavingsQuantified: plan.emissionsSavingsQuantified,
+      indoorMeasurementStatus: guidance.indoorMeasurementStatus,
+      emissionsImpactStatus: guidance.emissionsImpactStatus,
+      indoorGuidance: guidance.indoorGuidance,
+      routineRecommendations: guidance.routineRecommendations,
+      impactExplanations: guidance.impactExplanations,
+      retrieval: {
+        airRetrievedAt: forecast.airRetrievedAt ?? null,
+        weatherRetrievedAt: forecast.weatherRetrievedAt ?? null,
+        forecastValidAt: forecast.forecastValidAt ?? null,
+        modelInitializedAt: forecast.modelInitializedAt ?? null,
+        decisionFreshness: plan.decision?.dataFreshness ?? null,
+        forecastFreshness: plan.schedule?.forecastFreshness ?? null,
+      },
+    };
+    let explanation = { mode: "rules", text: familyRulesExplanation(payload) };
+    if (explain) {
+      try {
+        explanation = await explainFamilyPlan(payload);
+      } catch {
+        explanation = { mode: "rules-fallback", text: familyRulesExplanation(payload) };
+      }
+    }
+    return res.json({ ...payload, explanation });
+  } catch (error) {
+    const code = isTimeoutError(error) ? 504 : 502;
+    return res.status(code).json({ error: "Forecast data is temporarily unavailable." });
+  }
 });
 
 // ---------- Static frontend + SPA fallback ----------

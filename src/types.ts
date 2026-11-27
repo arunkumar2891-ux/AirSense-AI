@@ -261,3 +261,104 @@ export type GoWindowResponse = {
   limitations: string;
   estimate: true;
 };
+
+export type FamilySensitivity = "general" | "respiratory sensitivity" | "heart or lung condition";
+
+export type FamilyRoutine =
+  | "running"
+  | "cycling"
+  | "outdoor workout"
+  | "sports"
+  | "commuting"
+  | "daily activities"
+  | "children's outdoor play";
+
+export type FamilyAgeBand = "young_child" | "older_child" | "adult" | "older_adult";
+
+export type FamilyHousehold = {
+  members: { ageBand: FamilyAgeBand; count: number }[];
+  sensitivity: FamilySensitivity;
+  routines: FamilyRoutine[];
+  outing: {
+    activity: string;
+    durationMinutes: number;
+    timePreference: GoWindowTimePreference;
+  };
+};
+
+export type FamilyGuidanceCard = {
+  id: string;
+  category: string;
+  title: string;
+  description: string;
+  whyItHelps: string;
+  impactType: string;
+  limitations: string;
+};
+
+export type FamilyPlanRequest = {
+  latitude: number;
+  longitude: number;
+  household: FamilyHousehold;
+  explain?: boolean;
+};
+
+export type FamilyExplanation = {
+  mode: "ai" | "rules" | "rules-fallback";
+  text: string;
+};
+
+export type FamilyPlanResponse = {
+  ok: boolean;
+  governingProfile?: Profile;
+  basis?: {
+    childPresent?: boolean;
+    adultSharedOutdoor?: {
+      usedForHouseholdDecision?: boolean;
+      activityRecommendation?: string;
+      lessRestrictiveThanGoverning?: boolean;
+    } | null;
+  };
+  decision?: ExposureDecision;
+  schedule?: GoWindowResponse;
+  adultOnlyCommute?: {
+    audience?: string;
+    appliesToChildren?: boolean;
+    profile?: Profile;
+    decision?: ExposureDecision;
+  } | null;
+  activeTravel?: {
+    walking?: {
+      engineActivity?: string;
+      profile?: Profile;
+      decision?: ExposureDecision;
+      eligible?: boolean;
+    };
+    cycling?: {
+      engineActivity?: string;
+      profile?: Profile;
+      decision?: ExposureDecision;
+      eligible?: boolean;
+    };
+  };
+  sentences?: string[];
+  indoorAirUnmeasured?: boolean;
+  emissionsSavingsQuantified?: boolean;
+  indoorMeasurementStatus?: "not_measured";
+  emissionsImpactStatus?: "qualitative_only";
+  indoorGuidance?: {
+    measurementStatement?: string;
+    recommendations?: FamilyGuidanceCard[];
+  };
+  routineRecommendations?: FamilyGuidanceCard[];
+  impactExplanations?: FamilyGuidanceCard[];
+  explanation?: FamilyExplanation;
+  retrieval?: {
+    airRetrievedAt?: string | null;
+    weatherRetrievedAt?: string | null;
+    forecastValidAt?: string | null;
+    modelInitializedAt?: string | null;
+    decisionFreshness?: { state?: string; label?: string } | null;
+    forecastFreshness?: { state?: string; label?: string } | null;
+  };
+};
