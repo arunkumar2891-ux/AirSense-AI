@@ -495,6 +495,96 @@ describe("family plan route", { concurrency: 1 }, () => {
     assert.equal(contradicted.body.activeTravel.walking.eligible, false);
   });
 
+  function scheduleOutcome(schedule) {
+    return {
+      status: schedule.status,
+      activity: schedule.activity,
+      durationMinutes: schedule.durationMinutes,
+      windows: schedule.windows,
+      assessment: schedule.assessment,
+      reason: schedule.reason,
+    };
+  }
+
+  test("missing current US AQI keeps an insufficient plan when an explanation is requested", async () => {
+    providerMode = "insufficient";
+    const baseline = await request(app, { method: "POST", url: "/api/family-plan", body: childHousehold() });
+    assert.equal(baseline.status, 200);
+    assert.equal(baseline.body.decision.activityRecommendation, "insufficient_data");
+    assert.equal(baseline.body.decision.overallRisk, "unknown");
+    assert.equal(baseline.body.decision.trace.scoringApplied, false);
+    assert.equal(baseline.body.schedule.status, "insufficient_data");
+    assert.deepEqual(baseline.body.schedule.windows, []);
+    assert.equal(baseline.body.activeTravel.walking.eligible, false);
+    assert.equal(baseline.body.activeTravel.cycling.eligible, false);
+    assert.equal(baseline.body.activeTravel.walking.decision.activityRecommendation, "insufficient_data");
+    assert.equal(baseline.body.activeTravel.cycling.decision.activityRecommendation, "insufficient_data");
+    assert.equal(baseline.body.sentences.includes("outing_suitable"), false);
+    assert.equal(baseline.body.sentences.includes("outing_insufficient_data"), true);
+    assert.equal(geminiCalls.length, 0);
+
+    const deterministic = familyRulesExplanation(baseline.body);
+    const unsafe = {
+      recommendation: "insufficient_data",
+      claimIds: ["current_exposure_decision", "indoor_air_not_measured", "medical_disclaimer"],
+      explanation: "The household decision is insufficient data. Children can play outside and walking is suitable. Indoor air quality has not been measured by AirSense AI. This is not medical advice and it does not recommend treatment.",
+    };
+    geminiCalls = [];
+    geminiBehavior = { type: "body", body: unsafe };
+    const rejected = await request(app, {
+      method: "POST",
+      url: "/api/family-plan",
+      body: { ...childHousehold(), explain: true },
+    });
+    assert.equal(rejected.status, 200);
+    assert.equal(rejected.body.explanation.mode, "rules-fallback");
+    assert.equal(rejected.body.explanation.text, deterministic);
+    assert.equal(rejected.body.decision.activityRecommendation, "insufficient_data");
+    assert.equal(rejected.body.decision.overallRisk, "unknown");
+    assert.equal(rejected.body.decision.trace.scoringApplied, false);
+    assert.deepEqual(scheduleOutcome(rejected.body.schedule), scheduleOutcome(baseline.body.schedule));
+    assert.equal(rejected.body.decision.activityRecommendation, baseline.body.decision.activityRecommendation);
+    assert.equal(rejected.body.activeTravel.walking.eligible, false);
+    assert.equal(rejected.body.activeTravel.cycling.eligible, false);
+    assert.doesNotMatch(rejected.body.explanation.text, /\b(?:suitable|safe|fine|okay|acceptable)\b/i);
+    assert.equal(geminiCalls.length, 1);
+    const rejectedBody = JSON.stringify(rejected.body);
+    assert.equal(rejectedBody.includes("ClaimValidation"), false);
+    assert.equal(rejectedBody.includes("Explanation permits"), false);
+    assert.equal(rejectedBody.includes("test-key"), false);
+    assert.equal(rejectedBody.includes("air-quality-api"), false);
+    assert.equal(rejectedBody.includes("open-meteo"), false);
+    assert.equal(rejectedBody.includes("secret"), false);
+
+    geminiCalls = [];
+    geminiBehavior = {
+      type: "body",
+      body: { ...unsafe, explanation: deterministic },
+    };
+    const accepted = await request(app, {
+      method: "POST",
+      url: "/api/family-plan",
+      body: { ...childHousehold(), explain: true },
+    });
+    assert.equal(accepted.status, 200);
+    assert.equal(accepted.body.explanation.mode, "ai");
+    assert.equal(accepted.body.explanation.text, deterministic);
+    assert.equal(accepted.body.decision.activityRecommendation, "insufficient_data");
+    assert.equal(accepted.body.decision.overallRisk, "unknown");
+    assert.equal(accepted.body.decision.trace.scoringApplied, false);
+    assert.deepEqual(scheduleOutcome(accepted.body.schedule), scheduleOutcome(baseline.body.schedule));
+    assert.equal(accepted.body.activeTravel.walking.eligible, false);
+    assert.equal(accepted.body.activeTravel.cycling.eligible, false);
+    assert.doesNotMatch(accepted.body.explanation.text, /\b(?:suitable|safe|fine|okay|acceptable)\b/i);
+    assert.equal(accepted.body.sentences.includes("outing_suitable"), false);
+    assert.equal(geminiCalls.length, 1);
+    const acceptedBody = JSON.stringify(accepted.body);
+    assert.equal(acceptedBody.includes("ClaimValidation"), false);
+    assert.equal(acceptedBody.includes("test-key"), false);
+    assert.equal(acceptedBody.includes("air-quality-api"), false);
+    assert.equal(acceptedBody.includes("open-meteo"), false);
+  });
+
   test("the family route explains only through explainFamilyPlan and existing routes keep their contracts", async () => {
     const source = await readFile(new URL("./index.js", import.meta.url), "utf8");
     const gowindow = source.slice(source.indexOf('app.post("/api/gowindow"'), source.indexOf('app.post("/api/assistant"'));

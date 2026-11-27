@@ -163,6 +163,40 @@ export function familyPlanRequestKey(location: { lat: number; lon: number }, dra
   return JSON.stringify(request);
 }
 
+export function canStartFamilyExplanation(state: {
+  explainLoading: boolean;
+  explainPending: boolean;
+  planLoading: boolean;
+  planPending: boolean;
+}) {
+  return !state.explainLoading && !state.explainPending && !state.planLoading && !state.planPending;
+}
+
+export function canApplyFamilyExplanation(input: {
+  requestId: number;
+  latestRequestId: number;
+  requestKey: string;
+  currentKey: string;
+}) {
+  return input.requestId === input.latestRequestId && input.requestKey === input.currentKey;
+}
+
+export function familyPlanForDisplay(
+  plan: FamilyPlanResponse | null | undefined,
+  requestedExplanation: FamilyPlanResponse["explanation"] | null | undefined,
+): FamilyPlanResponse | null {
+  if (!plan) return null;
+  const mode = requestedExplanation?.mode;
+  const body = typeof requestedExplanation?.text === "string" ? requestedExplanation.text.trim() : "";
+  const accepted = (mode === "ai" || mode === "rules" || mode === "rules-fallback") && body;
+  if (!accepted) {
+    const displayed = { ...plan };
+    delete displayed.explanation;
+    return displayed;
+  }
+  return { ...plan, explanation: { mode, text: body } };
+}
+
 export function serializeFamilyHousehold(draft: FamilyDraft) {
   if (!validateFamilyDraft(draft).ok) return null;
   return JSON.stringify({

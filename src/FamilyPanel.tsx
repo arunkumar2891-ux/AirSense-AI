@@ -203,22 +203,20 @@ export default function FamilyPanel({
             <p>Walking: {view.walking.eligibilityLabel}. Traveler age group: {view.walking.ageGroup}. Recommendation: {view.walking.recommendationLabel}.</p>
             <p>Cycling: {view.cycling.eligibilityLabel}. Traveler age group: {view.cycling.ageGroup}. Recommendation: {view.cycling.recommendationLabel}.</p>
           </section>
-          <section className="family-block" aria-labelledby="family-explanation-title">
+          {view.explanation && <section className="family-block" aria-labelledby="family-explanation-title">
             <h3 id="family-explanation-title">Explanation of your family plan</h3>
             <p className="family-disclaimer">This explanation describes the family plan. It does not choose the safety decision.</p>
-            {view.explanation && <>
-              {view.explanation.label && <p className="family-explanation-label">{view.explanation.label}</p>}
-              <p className="family-disclaimer">{view.explanation.note}</p>
-              <p>{view.explanation.text}</p>
-            </>}
-            {explainLoading && <p className="family-status" role="status">Writing the AI explanation.</p>}
-            {explainError && <div className="family-state error" role="alert"><b>AI explanation unavailable</b><span>{explainError}</span></div>}
-            <div className="family-actions">
-              <button className="primary-btn" type="button" onClick={onExplain} disabled={explainLoading || !validation.ok} aria-busy={explainLoading}>
-                {explainLoading ? "Explaining the family plan…" : "Explain this plan"}
-              </button>
-            </div>
-          </section>
+            {view.explanation.label && <p className="family-explanation-label">{view.explanation.label}</p>}
+            <p className="family-disclaimer">{view.explanation.note}</p>
+            <p>{view.explanation.text}</p>
+          </section>}
+          {explainLoading && <p className="family-status" role="status">Writing the AI explanation.</p>}
+          {explainError && <div className="family-state error" role="alert"><b>AI explanation unavailable</b><span>{explainError}</span></div>}
+          <div className="family-actions">
+            <button className="primary-btn" type="button" onClick={onExplain} disabled={explainLoading || !validation.ok} aria-busy={explainLoading}>
+              Explain using AI
+            </button>
+          </div>
           <section className="family-block" aria-labelledby="family-indoor-title">
             <h3 id="family-indoor-title">At-home air-quality guidance</h3>
             <p className="family-disclaimer">{view.indoor.statement}</p>
