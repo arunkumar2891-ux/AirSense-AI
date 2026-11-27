@@ -5,7 +5,7 @@ import { askAssistant, findGoWindow, getAirQuality, requestFamilyPlan, reverseGe
 import type { AirData, AssistantLocation, DecisionTrace, ExposureDecision, FamilyPlanResponse, GoWindowResponse, GoWindowTimePreference, LocationResult, Profile, WindHypothetical } from "./types";
 import { describeCurrentActivityGuidance, describeWindUse, formatReportedWindSpeed, formatSourceDisclosure, formatTimingDisclosure, getAqiPresentation, getFreshnessPresentation, isLatestRequest, shouldApplyGpsResult, US_AQI_CATEGORIES } from "./reliability";
 import { buildGoWindowRequest, DEFAULT_GO_WINDOW_DURATION, DEFAULT_TIME_PREFERENCE, goWindowRequestKey } from "./gowindow";
-import { FAMILY_STORAGE_KEY, buildFamilyPlanRequest, canApplyFamilyExplanation, canStartFamilyExplanation, familyPlanForDisplay, familyPlanRequestKey, loadFamilyHousehold, serializeFamilyHousehold, type FamilyDraft } from "./family";
+import { FAMILY_STORAGE_KEY, buildFamilyPlanRequest, canApplyFamilyExplanation, canStartFamilyExplanation, defaultFamilyHousehold, familyPlanForDisplay, familyPlanRequestKey, readStoredHousehold, serializeFamilyHousehold, type FamilyDraft } from "./family";
 import { expandSection, readSectionExpanded, sectionFromHash, toggleSection, writeSectionExpanded, type SectionId } from "./sections";
 import GoWindowPanel from "./GoWindowPanel";
 import FamilyPanel from "./FamilyPanel";
@@ -13,13 +13,40 @@ import CollapsibleSection from "./CollapsibleSection";
 import BackToTop from "./BackToTop";
 import ThemeSelector from "./ThemeSelector";
 import { GPS_LOCATION_KEY, MANUAL_LOCATION_KEY, locationForSession, readStoredLocation } from "./location-session";
+import { readPreference, removePreference, writePreference } from "./browser-store";
+import { GO_WINDOW_SETTINGS_KEY, isDefaultGoWindowSettings, readGoWindowSettings, serializeGoWindowSettings } from "./gowindow-settings";
 
 const fallbackCity = { name: "Chennai, Tamil Nadu, India", lat: 13.0827, lon: 80.2707 };
 const prompts = ["Why does PM2.5 matter?", "What precautions should children take?", "Explain today's pollution levels", "How does wind affect outdoor pollution?"];
 
-// Session-scoped storage keys (cleared when the tab closes — precise coordinates
-// are never persisted beyond the session).
+// The saved place, household, and GoWindow settings stay in this browser until
+// the user clears them. Open and closed sections stay with the tab.
 const KEY_GEO_ASKED = "airsense.geoAsked";
+
+function initialHousehold(): FamilyDraft {
+  try {
+    return readStoredHousehold(readPreference(localStorage, sessionStorage, FAMILY_STORAGE_KEY));
+  } catch {
+    return defaultFamilyHousehold();
+  }
+}
+
+function initialGoWindow() {
+  const fallback = {
+    profile: { activity: "running", ageGroup: "adult", sensitivity: "general" } as Profile,
+    durationMinutes: DEFAULT_GO_WINDOW_DURATION,
+    timePreference: DEFAULT_TIME_PREFERENCE,
+  };
+  try {
+    return readGoWindowSettings(readPreference(localStorage, sessionStorage, GO_WINDOW_SETTINGS_KEY));
+  } catch {
+    return fallback;
+  }
+}
+
+function rememberGeoAsked() {
+  writePreference(localStorage, sessionStorage, KEY_GEO_ASKED, "1");
+}
 
 type LocSource = "gps" | "manual" | "default";
 type LocState = { lat: number; lon: number; label: string; source: LocSource };
@@ -61,7 +88,7 @@ function App() {
   const [air, setAir] = useState<AirData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [profile, setProfile] = useState<Profile>({ activity: "running", ageGroup: "adult", sensitivity: "general" });
+  const [profile, setProfile] = useState<Profile>(() => initialGoWindow().profile);
   const [question, setQuestion] = useState("");
   const [askedQuestion, setAskedQuestion] = useState("");
   const [answer, setAnswer] = useState("");
@@ -72,15 +99,13 @@ function App() {
   const [decision, setDecision] = useState<ExposureDecision | null>(null);
   const [locations, setLocations] = useState<AssistantLocation[]>([]);
   const [assistantError, setAssistantError] = useState("");
-  const [duration, setDuration] = useState(DEFAULT_GO_WINDOW_DURATION);
-  const [timePreference, setTimePreference] = useState<GoWindowTimePreference>(DEFAULT_TIME_PREFERENCE);
+  const [duration, setDuration] = useState(() => initialGoWindow().durationMinutes);
+  const [timePreference, setTimePreference] = useState<GoWindowTimePreference>(() => initialGoWindow().timePreference);
   const [schedule, setSchedule] = useState<GoWindowResponse | null>(null);
   const [scheduleKey, setScheduleKey] = useState("");
   const [scheduleLoading, setScheduleLoading] = useState(false);
   const [scheduleError, setScheduleError] = useState("");
-  const [household, setHousehold] = useState<FamilyDraft>(() => {
-    try { return loadFamilyHousehold(sessionStorage); } catch { return loadFamilyHousehold(null); }
-  });
+  const [household, setHousehold] = useState<FamilyDraft>(initialHousehold);
   const [familyPlan, setFamilyPlan] = useState<FamilyPlanResponse | null>(null);
   const [familyPlanKey, setFamilyPlanKey] = useState("");
   const [familyLoading, setFamilyLoading] = useState(false);
@@ -180,9 +205,12 @@ function App() {
     setAnswer(""); setAssistantError(""); setDecision(null); setMode("");
     if (persist) {
       try {
-        if (next.source === "gps") { sessionStorage.setItem(GPS_LOCATION_KEY, JSON.stringify(next)); sessionStorage.removeItem(MANUAL_LOCATION_KEY); }
-        if (next.source === "manual") { sessionStorage.setItem(MANUAL_LOCATION_KEY, JSON.stringify(next)); }
-      } catch { /* storage unavailable — location simply won't persist for the session */ }
+        if (next.source === "gps") {
+          writePreference(localStorage, sessionStorage, GPS_LOCATION_KEY, JSON.stringify(next));
+          removePreference(localStorage, sessionStorage, MANUAL_LOCATION_KEY);
+        }
+        if (next.source === "manual") writePreference(localStorage, sessionStorage, MANUAL_LOCATION_KEY, JSON.stringify(next));
+      } catch { /* storage unavailable — the place stays in memory */ }
     }
     refresh(next.lat, next.lon);
   }
@@ -202,7 +230,7 @@ function App() {
     const requestId = ++gpsRequestRef.current;
     const startedRevision = locationRevisionRef.current;
     setGeoBusy(true); setGeoNotice("");
-    try { sessionStorage.setItem(KEY_GEO_ASKED, "1"); } catch { /* ignore */ }
+    try { rememberGeoAsked(); } catch { /* ignore */ }
     navigator.geolocation.getCurrentPosition(
       async (position) => {
         const lat = position.coords.latitude;
@@ -225,9 +253,19 @@ function App() {
   }
 
   function returnToGps() {
-    const saved = readStoredLocation(sessionStorage, GPS_LOCATION_KEY);
-    if (saved) { sessionStorage.removeItem(MANUAL_LOCATION_KEY); applyLocation({ ...saved, source: "gps" }, false); return; }
+    const saved = readStoredLocation(localStorage, sessionStorage, GPS_LOCATION_KEY);
+    if (saved) {
+      removePreference(localStorage, sessionStorage, MANUAL_LOCATION_KEY);
+      applyLocation({ ...saved, source: "gps" }, false);
+      return;
+    }
     requestGps();
+  }
+
+  function clearSavedPlace() {
+    removePreference(localStorage, sessionStorage, GPS_LOCATION_KEY);
+    removePreference(localStorage, sessionStorage, MANUAL_LOCATION_KEY);
+    applyLocation({ lat: fallbackCity.lat, lon: fallbackCity.lon, label: fallbackCity.name, source: "default" }, false);
   }
 
   function selectSearchResult(item: LocationResult) {
@@ -236,30 +274,35 @@ function App() {
     applyLocation({ lat: item.latitude, lon: item.longitude, label, source: "manual" }, true);
   }
 
-  // Initial load: never block on a new location prompt. A place chosen earlier
-  // in this tab wins, including the current GPS fix. Chennai is only the
-  // fallback when this tab has no saved place.
+  // Initial load: never block on a new location prompt. A saved place is shown
+  // immediately. Chennai is only the fallback when nothing has been saved.
+  // A searched city stays until it is cleared. Granted location permission
+  // loads the current place without another prompt.
   useEffect(() => {
     let saved: LocState | null = null;
-    try { saved = locationForSession(sessionStorage); } catch { saved = null; }
+    try { saved = locationForSession(localStorage, sessionStorage); } catch { saved = null; }
     if (saved) applyLocation(saved, false);
     else refresh(fallbackCity.lat, fallbackCity.lon);
     const initialRevision = locationRevisionRef.current;
 
     let asked = false;
-    try { asked = sessionStorage.getItem(KEY_GEO_ASKED) === "1"; } catch { /* ignore */ }
-    if (saved || asked) return;
+    try { asked = readPreference(localStorage, sessionStorage, KEY_GEO_ASKED) === "1"; } catch { /* ignore */ }
+    if (saved?.source === "manual") return;
     if (!navigator.geolocation) return;
     const permissions = (navigator as Navigator & { permissions?: { query: (d: { name: string }) => Promise<{ state: string }> } }).permissions;
-    if (permissions?.query) {
-      permissions.query({ name: "geolocation" }).then((status) => {
-        if (locationRevisionRef.current !== initialRevision) return;
-        if (status.state === "granted") requestGps(); // previously allowed — no extra explanation needed
-        else if (status.state === "prompt") setShowGeoBanner(true); // explain first, then request on user action
-        // "denied" → stay on the default city with the search field; never re-prompt
-      }).catch(() => setShowGeoBanner(true));
-    } else {
+    const adoptGrantedLocation = (state: string) => {
+      if (locationRevisionRef.current !== initialRevision) return;
+      if (state === "granted") {
+        requestGps();
+        return;
+      }
+      if (saved || asked || state === "denied") return;
       setShowGeoBanner(true);
+    };
+    if (permissions?.query) {
+      permissions.query({ name: "geolocation" }).then((status) => adoptGrantedLocation(status.state)).catch(() => adoptGrantedLocation("prompt"));
+    } else {
+      adoptGrantedLocation("prompt");
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -273,6 +316,17 @@ function App() {
   }, []);
 
   const scheduleRequestKey = goWindowRequestKey(loc, profile, duration, timePreference);
+  useEffect(() => {
+    const settings = { profile, durationMinutes: duration, timePreference };
+    try {
+      if (isDefaultGoWindowSettings(settings)) {
+        removePreference(localStorage, sessionStorage, GO_WINDOW_SETTINGS_KEY);
+        return;
+      }
+      const raw = serializeGoWindowSettings(settings);
+      if (raw) writePreference(localStorage, sessionStorage, GO_WINDOW_SETTINGS_KEY, raw);
+    } catch { /* the choice stays in memory */ }
+  }, [profile, duration, timePreference]);
   useEffect(() => {
     goWindowAbortRef.current?.abort();
     goWindowRequestRef.current += 1;
@@ -424,8 +478,25 @@ function App() {
     setHousehold(next);
     try {
       const stored = serializeFamilyHousehold(next);
-      if (stored) sessionStorage.setItem(FAMILY_STORAGE_KEY, stored);
+      const fallback = serializeFamilyHousehold(defaultFamilyHousehold());
+      if (stored && stored !== fallback) writePreference(localStorage, sessionStorage, FAMILY_STORAGE_KEY, stored);
+      else if (stored === fallback) removePreference(localStorage, sessionStorage, FAMILY_STORAGE_KEY);
     } catch { /* storage unavailable — the household stays in memory */ }
+  }
+
+  function resetHousehold() {
+    updateHousehold(defaultFamilyHousehold());
+  }
+
+  function resetGoWindow() {
+    const next = {
+      profile: { activity: "running", ageGroup: "adult", sensitivity: "general" } as Profile,
+      durationMinutes: DEFAULT_GO_WINDOW_DURATION,
+      timePreference: DEFAULT_TIME_PREFERENCE,
+    };
+    setProfile(next.profile);
+    setDuration(next.durationMinutes);
+    setTimePreference(next.timePreference);
   }
 
   async function planHousehold() {
@@ -581,9 +652,9 @@ function App() {
 
       {showGeoBanner && <div className="geo-banner" role="dialog" aria-label="Location permission">
         <MapPin size={16}/>
-        <div className="geo-banner-text"><b>Use your location?</b><span>AirSense uses your coordinates for local air data and shares them directly with BigDataCloud to display a place name. They stay in this browser session and are never sent to the AI assistant.</span></div>
+        <div className="geo-banner-text"><b>Use your location?</b><span>AirSense uses your coordinates for local air data and shares them directly with BigDataCloud to display a place name. They stay in this browser until you clear the saved place, and are never sent to the AI assistant.</span></div>
         <button className="geo-allow" onClick={requestGps} disabled={geoBusy}>{geoBusy ? "Locating…" : "Allow location"}</button>
-        <button className="geo-dismiss" aria-label="Dismiss" onClick={() => { setShowGeoBanner(false); setGeoNotice("No problem — showing the default city, Chennai. Search for any place above."); try { sessionStorage.setItem(KEY_GEO_ASKED, "1"); } catch { /* ignore */ } }}><X size={14}/></button>
+        <button className="geo-dismiss" aria-label="Dismiss" onClick={() => { setShowGeoBanner(false); setGeoNotice("No problem — showing the default city, Chennai. Search for any place above."); try { rememberGeoAsked(); } catch { /* ignore */ } }}><X size={14}/></button>
       </div>}
 
       <section className="location-row">
@@ -591,6 +662,7 @@ function App() {
           <MapPin size={16}/>
           <span className="location-name" title={loc.label}>{loc.source === "default" ? "Default · Chennai" : loc.label}</span>
           <span className={`source-badge ${loc.source}`}>{loc.source === "gps" ? "GPS" : loc.source === "manual" ? "SELECTED" : "DEFAULT"}</span>
+          {loc.source !== "default" && <button className="quiet-btn" type="button" onClick={clearSavedPlace}>Clear saved place</button>}
           <span className={`data-status ${dataStatus.state}`} role="status">{dataStatus.label}</span>
         </div>
         <span className="muted location-timing">{loading ? "Loading forecast timing…" : timingDisclosure ? timingDisclosure.summary : "Forecast timing unavailable"}</span>
@@ -644,6 +716,8 @@ function App() {
         hourly={air?.hourly ?? []}
         timezone={air?.location.timezone ?? null}
         onFind={findBestTime}
+        canReset={!isDefaultGoWindowSettings({ profile, durationMinutes: duration, timePreference })}
+        onReset={resetGoWindow}
         expanded={sections.gowindow}
         onToggle={() => toggleDashboardSection("gowindow")}
       />
@@ -659,6 +733,8 @@ function App() {
         explainLoading={familyExplainLoading}
         explainError={familyExplainError}
         onExplain={explainHousehold}
+        canReset={serializeFamilyHousehold(household) !== serializeFamilyHousehold(defaultFamilyHousehold())}
+        onReset={resetHousehold}
         expanded={sections.family}
         onToggle={() => toggleDashboardSection("family")}
       />
@@ -715,7 +791,7 @@ function App() {
           <div className="disclaimer">Guidance is informational, not medical advice. Follow local public-health advisories.</div>
         </div>
       </CollapsibleSection>
-      <div className="privacy"><ShieldCheck size={16}/><div><b>Privacy first</b><small>Location is used for local air data. GPS coordinates are shared directly with BigDataCloud only to name your location, stay in this session, and are never sent to the AI model.</small></div></div>
+      <div className="privacy"><ShieldCheck size={16}/><div><b>Privacy first</b><small>Location is used for local air data. GPS coordinates are shared directly with BigDataCloud only to name your location, stay in this browser until you clear the saved place, and are never sent to the AI model.</small></div></div>
       <footer><span><Leaf size={14}/> Make every breath count.</span><span>Data: Open-Meteo · Powered by CAMS · <a href="https://open-meteo.com/" target="_blank" rel="noreferrer">Data attribution</a></span></footer>
     </main>
     <BackToTop />

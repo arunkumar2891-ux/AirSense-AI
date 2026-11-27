@@ -30,12 +30,14 @@ type Props = {
   hourly: TimelineHourReading[];
   timezone: string | null;
   onFind: () => void;
+  canReset: boolean;
+  onReset: () => void;
   expanded: boolean;
   onToggle: () => void;
 };
 
 export default function GoWindowPanel({
-  locationLabel, profile, onProfileChange, duration, onDurationChange, timePreference, onTimePreferenceChange, loading, error, result, hourly, timezone, onFind, expanded, onToggle,
+  locationLabel, profile, onProfileChange, duration, onDurationChange, timePreference, onTimePreferenceChange, loading, error, result, hourly, timezone, onFind, canReset, onReset, expanded, onToggle,
 }: Props) {
   const display = presentGoWindow(result);
   return <CollapsibleSection
@@ -89,6 +91,7 @@ export default function GoWindowPanel({
         <button className="primary-btn" type="button" onClick={onFind} disabled={loading} aria-busy={loading}>
           {loading ? "Finding your best time…" : "Find my best time"}
         </button>
+        {canReset && <button className="quiet-btn" type="button" onClick={onReset}>Reset activity settings</button>}
         <p>Results are forecast estimates, not guarantees or medical clearance.</p>
       </div>
       <ActivityTimeline hourly={hourly} timezone={timezone} timePreference={timePreference} result={loading ? null : result} />

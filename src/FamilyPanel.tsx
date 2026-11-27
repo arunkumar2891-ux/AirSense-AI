@@ -24,6 +24,8 @@ type Props = {
   explainLoading: boolean;
   explainError: string;
   onExplain: () => void;
+  canReset: boolean;
+  onReset: () => void;
   expanded: boolean;
   onToggle: () => void;
 };
@@ -50,7 +52,7 @@ const counts = [
 
 export default function FamilyPanel({
   locationLabel, household, onHouseholdChange, loading, error, result, now, onPlan,
-  explainLoading, explainError, onExplain, expanded, onToggle,
+  explainLoading, explainError, onExplain, canReset, onReset, expanded, onToggle,
 }: Props) {
   const validation = validateFamilyDraft(household);
   const view = presentFamilyPlan(result);
@@ -163,6 +165,7 @@ export default function FamilyPanel({
           <button className="primary-btn" type="submit" disabled={loading || !validation.ok} aria-busy={loading}>
             {loading ? "Updating the family plan…" : "Update family plan"}
           </button>
+          {canReset && <button className="quiet-btn" type="button" onClick={onReset}>Reset household</button>}
           <p>The plan is a modelled forecast estimate. It is not medical advice or a street-level measurement.</p>
         </div>
       </form>

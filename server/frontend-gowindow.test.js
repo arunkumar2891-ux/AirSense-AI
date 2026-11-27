@@ -300,6 +300,27 @@ test("frontend and backend time-preference registries stay in parity", async () 
   }
 });
 
+test("GoWindow settings stay saved until reset and reject invalid choices", async () => {
+  const settings = await import(await compile("gowindow-settings.ts"));
+  const saved = {
+    profile: { activity: "cycling", ageGroup: "child", sensitivity: "respiratory sensitivity" },
+    durationMinutes: 30,
+    timePreference: "morning",
+  };
+  const raw = settings.serializeGoWindowSettings(saved);
+  assert.deepEqual(settings.readGoWindowSettings(raw), saved);
+  assert.equal(settings.readGoWindowSettings("{").profile.activity, "running");
+  assert.equal(settings.readGoWindowSettings(JSON.stringify({
+    profile: { activity: "sleeping", ageGroup: "adult", sensitivity: "general" },
+    durationMinutes: 45,
+    timePreference: "daytime",
+  })).profile.activity, "running");
+  assert.equal(settings.serializeGoWindowSettings({ ...saved, durationMinutes: 10 }), null);
+  assert.equal(settings.isDefaultGoWindowSettings(settings.defaultGoWindowSettings()), true);
+  assert.equal(settings.isDefaultGoWindowSettings(saved), false);
+  assert.equal(settings.GO_WINDOW_SETTINGS_KEY, "airsense.gowindow");
+});
+
 test("dashboard wiring prevents duplicate submissions and stale GoWindow responses", async () => {
   const app = await readFile(new URL("../src/App.tsx", import.meta.url), "utf8");
   const api = await readFile(new URL("../src/api.ts", import.meta.url), "utf8");
@@ -315,6 +336,8 @@ test("dashboard wiring prevents duplicate submissions and stale GoWindow respons
   assert.match(panel, /disabled=\{loading\}/);
   assert.match(panel, /Finding your best time/);
   assert.match(panel, /Find my best time/);
+  assert.match(panel, /Reset activity settings/);
+  assert.match(app, /GO_WINDOW_SETTINGS_KEY/);
   assert.match(panel, /Preferred time of day/);
   assert.match(helper, /Daytime \(5 AM–10 PM\)/);
   assert.match(helper, /DEFAULT_TIME_PREFERENCE: GoWindowTimePreference = "daytime"|DEFAULT_TIME_PREFERENCE = "daytime"/);

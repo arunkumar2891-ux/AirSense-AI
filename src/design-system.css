@@ -251,6 +251,21 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .location-control { flex: 0 0 auto; }
 
+.quiet-btn {
+  min-height: 32px;
+  align-self: center;
+  padding: 0 2px;
+  color: var(--text-secondary);
+  background: transparent;
+  border: 0;
+  font-size: 11px;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+.quiet-btn:hover { color: var(--blue-deep); }
+
 .theme-control {
   min-height: 38px;
   display: inline-flex;
@@ -1029,6 +1044,7 @@ select:focus-visible {
   .timeline-picker li { width: 100%; }
   .timeline-pick { width: 100%; min-height: 44px; }
   .primary-btn { min-height: 44px; }
+  .quiet-btn { min-height: 44px; align-self: flex-start; }
   .profile-controls select,
   .prompt-list button,
   .icon-btn,

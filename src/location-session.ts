@@ -1,3 +1,5 @@
+import { readPreference, type PreferenceStore } from "./browser-store";
+
 export const MANUAL_LOCATION_KEY = "airsense.manual";
 export const GPS_LOCATION_KEY = "airsense.gps";
 
@@ -8,30 +10,32 @@ export type SessionLocation = {
   source: "gps" | "manual";
 };
 
-export function readStoredLocation(storage: Pick<Storage, "getItem"> | null, key: string): SessionLocation | null {
-  if (!storage) return null;
+function parseStoredLocation(raw: string | null, key: string): SessionLocation | null {
+  if (!raw) return null;
   try {
-    const raw = storage.getItem(key);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as { lat?: unknown; lon?: unknown; label?: unknown; source?: unknown };
+    const parsed = JSON.parse(raw) as { lat?: unknown; lon?: unknown; label?: unknown };
     if (!Number.isFinite(parsed?.lat) || !Number.isFinite(parsed?.lon) || typeof parsed?.label !== "string" || !parsed.label.trim()) return null;
     return {
       lat: parsed.lat as number,
       lon: parsed.lon as number,
       label: parsed.label,
-      source: parsed.source === "gps" ? "gps" : "manual",
+      source: key === GPS_LOCATION_KEY ? "gps" : "manual",
     };
   } catch {
     return null;
   }
 }
 
-// A searched place wins over the saved GPS fix. GPS is restored before the
-// default city so a refresh keeps the current location chosen in this tab.
-export function locationForSession(storage: Pick<Storage, "getItem"> | null): SessionLocation | null {
-  const manual = readStoredLocation(storage, MANUAL_LOCATION_KEY);
+export function readStoredLocation(local: PreferenceStore | null, session: PreferenceStore | null, key: string): SessionLocation | null {
+  return parseStoredLocation(readPreference(local, session, key), key);
+}
+
+// A searched place wins over the saved GPS fix. Both stay in this browser
+// until the user clears them. Closing the tab does not return to Chennai.
+export function locationForSession(local: PreferenceStore | null, session: PreferenceStore | null = null): SessionLocation | null {
+  const manual = readStoredLocation(local, session, MANUAL_LOCATION_KEY);
   if (manual) return { ...manual, source: "manual" };
-  const gps = readStoredLocation(storage, GPS_LOCATION_KEY);
+  const gps = readStoredLocation(local, session, GPS_LOCATION_KEY);
   if (gps) return { ...gps, source: "gps" };
   return null;
 }

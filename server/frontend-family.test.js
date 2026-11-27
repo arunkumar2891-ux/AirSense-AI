@@ -358,6 +358,8 @@ test("family controls, persistence, and stale-result handling stay in the dashbo
   assert.match(app, /activity: "running", ageGroup: "adult", sensitivity: "general"/);
   assert.match(app, /profile=\{profile\}/);
   assert.match(app, /FAMILY_STORAGE_KEY/);
+  assert.match(app, /writePreference\(localStorage, sessionStorage, FAMILY_STORAGE_KEY/);
+  assert.match(panel, /Reset household/);
   assert.match(app, /familyAbortRef\.current\?\.abort\(\)/);
   assert.match(app, /isLatestRequest\(requestId, familyRequestRef\.current\)/);
   assert.match(app, /setFamilyPlan\(null\)/);
