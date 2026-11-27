@@ -5,7 +5,7 @@ import { askAssistant, findGoWindow, getAirQuality, requestFamilyPlan, reverseGe
 import type { AirData, AssistantLocation, DecisionTrace, ExposureDecision, FamilyPlanResponse, GoWindowResponse, GoWindowTimePreference, LocationResult, Profile, WindHypothetical } from "./types";
 import { describeCurrentActivityGuidance, describeWindUse, formatReportedWindSpeed, formatSourceDisclosure, formatTimingDisclosure, getAqiPresentation, getFreshnessPresentation, isLatestRequest, shouldApplyGpsResult, US_AQI_CATEGORIES } from "./reliability";
 import { buildGoWindowRequest, DEFAULT_GO_WINDOW_DURATION, DEFAULT_TIME_PREFERENCE, goWindowRequestKey } from "./gowindow";
-import { FAMILY_STORAGE_KEY, buildFamilyPlanRequest, familyPlanRequestKey, loadFamilyHousehold, serializeFamilyHousehold, type FamilyDraft } from "./family";
+import { FAMILY_STORAGE_KEY, buildFamilyPlanRequest, canApplyFamilyExplanation, canStartFamilyExplanation, familyPlanForDisplay, familyPlanRequestKey, loadFamilyHousehold, serializeFamilyHousehold, type FamilyDraft } from "./family";
 import GoWindowPanel from "./GoWindowPanel";
 import FamilyPanel from "./FamilyPanel";
 import ThemeSelector from "./ThemeSelector";
@@ -97,6 +97,7 @@ function App() {
   const [familyError, setFamilyError] = useState("");
   const [familyExplainLoading, setFamilyExplainLoading] = useState(false);
   const [familyExplainError, setFamilyExplainError] = useState("");
+  const [familyExplanation, setFamilyExplanation] = useState<FamilyPlanResponse["explanation"] | null>(null);
   const [clockNow, setClockNow] = useState(() => Date.now());
 
   useEffect(() => {
@@ -273,6 +274,7 @@ function App() {
     familyExplainPendingRef.current = false;
     setFamilyExplainLoading(false);
     setFamilyExplainError("");
+    setFamilyExplanation(null);
   }, [familySelectionKey]);
 
   useEffect(() => {
@@ -419,6 +421,7 @@ function App() {
     setFamilyLoading(true);
     setFamilyExplainLoading(false);
     setFamilyExplainError("");
+    setFamilyExplanation(null);
     setFamilyPlan(null);
     setFamilyPlanKey("");
     setFamilyError("");
@@ -439,7 +442,12 @@ function App() {
   }
 
   async function explainHousehold() {
-    if (familyExplainLoading || familyExplainPendingRef.current || familyLoading || familyPendingRef.current) return;
+    if (!canStartFamilyExplanation({
+      explainLoading: familyExplainLoading,
+      explainPending: familyExplainPendingRef.current,
+      planLoading: familyLoading,
+      planPending: familyPendingRef.current,
+    })) return;
     const request = buildFamilyPlanRequest(loc, household, true);
     if (!request) return;
     familyExplainPendingRef.current = true;
@@ -452,10 +460,15 @@ function App() {
     setFamilyExplainError("");
     try {
       const result = await requestFamilyPlan(request, controller.signal);
-      if (!isLatestRequest(requestId, familyRequestRef.current)) return;
-      if (familyPlanRequestKey(loc, household) !== requestKey) return;
+      if (controller.signal.aborted || !canApplyFamilyExplanation({
+        requestId,
+        latestRequestId: familyRequestRef.current,
+        requestKey,
+        currentKey: familyPlanRequestKey(loc, household),
+      })) return;
       setFamilyPlan(result);
       setFamilyPlanKey(requestKey);
+      setFamilyExplanation(result.explanation ?? null);
     } catch (e) {
       if (controller.signal.aborted || !isLatestRequest(requestId, familyRequestRef.current)) return;
       setFamilyExplainError(e instanceof Error ? e.message : "AI explanation unavailable.");
@@ -611,7 +624,7 @@ function App() {
         onHouseholdChange={updateHousehold}
         loading={familyLoading && familyPlanKey === ""}
         error={familyError}
-        result={familyPlanKey === familySelectionKey ? familyPlan : null}
+        result={familyPlanForDisplay(familyPlanKey === familySelectionKey ? familyPlan : null, familyExplanation)}
         now={clockNow}
         onPlan={planHousehold}
         explainLoading={familyExplainLoading}
