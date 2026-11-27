@@ -981,12 +981,13 @@ select:focus-visible {
   .primary-nav {
     grid-column: 1;
     grid-row: 2;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(148px, 1fr));
+    gap: 4px;
     width: 100%;
-    overflow-x: auto;
-    scrollbar-width: none;
+    overflow: visible;
   }
-  .primary-nav::-webkit-scrollbar { display: none; }
-  .nav { min-height: 40px; flex: 1 0 auto; justify-content: center; }
+  .nav { min-height: 44px; min-width: 0; justify-content: center; white-space: normal; text-align: center; line-height: 1.2; }
   .nav-actions {
     grid-column: 1;
     grid-row: 3;
@@ -1044,7 +1045,7 @@ select:focus-visible {
   .nav { padding-inline: 8px; font-size: 10px; }
   .nav svg { width: 14px; }
   .theme-control { padding-inline: 8px; }
-  .theme-control select { width: 72px; min-width: 0; }
+  .theme-control select { width: auto; min-width: 4.8em; }
   .pollutant-grid { gap: 8px; }
   .pollutant-card { min-height: 120px; padding: 13px; }
   .pollutant-top .muted { display: none; }

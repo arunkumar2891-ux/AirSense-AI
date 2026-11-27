@@ -12,30 +12,17 @@ import FamilyPanel from "./FamilyPanel";
 import CollapsibleSection from "./CollapsibleSection";
 import BackToTop from "./BackToTop";
 import ThemeSelector from "./ThemeSelector";
+import { GPS_LOCATION_KEY, MANUAL_LOCATION_KEY, locationForSession, readStoredLocation } from "./location-session";
 
 const fallbackCity = { name: "Chennai, Tamil Nadu, India", lat: 13.0827, lon: 80.2707 };
 const prompts = ["Why does PM2.5 matter?", "What precautions should children take?", "Explain today's pollution levels", "How does wind affect outdoor pollution?"];
 
 // Session-scoped storage keys (cleared when the tab closes — precise coordinates
 // are never persisted beyond the session).
-const KEY_MANUAL = "airsense.manual";
-const KEY_GPS = "airsense.gps";
 const KEY_GEO_ASKED = "airsense.geoAsked";
 
 type LocSource = "gps" | "manual" | "default";
 type LocState = { lat: number; lon: number; label: string; source: LocSource };
-
-function loadSession(key: string): LocState | null {
-  try {
-    const raw = sessionStorage.getItem(key);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw);
-    if (Number.isFinite(parsed?.lat) && Number.isFinite(parsed?.lon) && typeof parsed?.label === "string") {
-      return { lat: parsed.lat, lon: parsed.lon, label: parsed.label, source: parsed.source === "gps" ? "gps" : "manual" };
-    }
-  } catch { /* ignore corrupt session data */ }
-  return null;
-}
 
 function formatAtLocation(value: string, timezone: string, options: Intl.DateTimeFormatOptions) {
   const date = new Date(value);
@@ -193,8 +180,8 @@ function App() {
     setAnswer(""); setAssistantError(""); setDecision(null); setMode("");
     if (persist) {
       try {
-        if (next.source === "gps") { sessionStorage.setItem(KEY_GPS, JSON.stringify(next)); sessionStorage.removeItem(KEY_MANUAL); }
-        if (next.source === "manual") { sessionStorage.setItem(KEY_MANUAL, JSON.stringify(next)); }
+        if (next.source === "gps") { sessionStorage.setItem(GPS_LOCATION_KEY, JSON.stringify(next)); sessionStorage.removeItem(MANUAL_LOCATION_KEY); }
+        if (next.source === "manual") { sessionStorage.setItem(MANUAL_LOCATION_KEY, JSON.stringify(next)); }
       } catch { /* storage unavailable — location simply won't persist for the session */ }
     }
     refresh(next.lat, next.lon);
@@ -238,8 +225,8 @@ function App() {
   }
 
   function returnToGps() {
-    const saved = loadSession(KEY_GPS);
-    if (saved) { sessionStorage.removeItem(KEY_MANUAL); applyLocation({ ...saved, source: "gps" }, false); return; }
+    const saved = readStoredLocation(sessionStorage, GPS_LOCATION_KEY);
+    if (saved) { sessionStorage.removeItem(MANUAL_LOCATION_KEY); applyLocation({ ...saved, source: "gps" }, false); return; }
     requestGps();
   }
 
@@ -249,18 +236,19 @@ function App() {
     applyLocation({ lat: item.latitude, lon: item.longitude, label, source: "manual" }, true);
   }
 
-  // Initial load: never block on location. Manual selection from earlier in the
-  // session wins; otherwise load Chennai immediately, then decide whether
-  // to offer geolocation (with an explanation) based on the permission state.
+  // Initial load: never block on a new location prompt. A place chosen earlier
+  // in this tab wins, including the current GPS fix. Chennai is only the
+  // fallback when this tab has no saved place.
   useEffect(() => {
-    const manual = loadSession(KEY_MANUAL);
-    if (manual) applyLocation({ ...manual, source: "manual" }, false);
-    else { refresh(fallbackCity.lat, fallbackCity.lon); }
+    let saved: LocState | null = null;
+    try { saved = locationForSession(sessionStorage); } catch { saved = null; }
+    if (saved) applyLocation(saved, false);
+    else refresh(fallbackCity.lat, fallbackCity.lon);
     const initialRevision = locationRevisionRef.current;
 
     let asked = false;
     try { asked = sessionStorage.getItem(KEY_GEO_ASKED) === "1"; } catch { /* ignore */ }
-    if (manual || asked) return;
+    if (saved || asked) return;
     if (!navigator.geolocation) return;
     const permissions = (navigator as Navigator & { permissions?: { query: (d: { name: string }) => Promise<{ state: string }> } }).permissions;
     if (permissions?.query) {
