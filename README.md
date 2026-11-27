@@ -8,9 +8,11 @@ AirSense AI is an urban air-quality assistant for families and communities. It a
 
 People usually see one AQI number and still have to decide whether a run, a commute, or outdoor play makes sense. AirSense keeps that decision in a rule engine. The current reading answers "what should I do now?" GoWindow answers "when, in the next 12 hours, does this activity have a long enough suitable interval?" A better hour later does not change the current recommendation. The Family Assistant answers a household question with the same engine: one shared outing, plus walking and cycling judged on their own.
 
-The dashboard opens on Chennai without an account or a location grant. Search, optional browser location, activity, age group, and sensitivity change the same deterministic result. Gemini is optional. With no API key, the assistant and the Family Assistant still return the engine's recommendation.
+The dashboard opens on Chennai without an account. On a first visit it explains optional browser location and continues immediately. If this browser has already allowed location, the current place loads automatically with no extra prompt. Search, optional browser location, activity, age group, and sensitivity change the same deterministic result. Gemini is optional. With no API key, the assistant and the Family Assistant still return the engine's recommendation.
 
-The current modelled air quality, weather, location, and alert banners stay open. The hourly forecast, GoWindow, Family air plan, pollutant breakdown, and Ask AirSense AI sections start collapsed. Each header opens and closes that section, and the choice is kept in `sessionStorage` for the browser tab under `airsense.sections`. A floating Back to top button appears after the page has scrolled 480 pixels. It scrolls smoothly, or jumps when the browser asks for reduced motion.
+The saved place, the family household form, and the GoWindow activity profile, duration, and time preference stay in `localStorage` until you clear them. Closing the tab does not remove them. Use **Clear saved place**, **Reset household**, or **Reset activity settings** to return those choices to the defaults. Forecast results, air-quality readings, family plans, and explanations are not stored in the browser.
+
+The current modelled air quality, weather, location, and alert banners stay open. The hourly forecast, GoWindow, Family air plan, pollutant breakdown, and Ask AirSense AI sections start collapsed. Each header opens and closes that section, and the choice is kept in `sessionStorage` for the browser tab under `airsense.sections`. A floating **Back to top** button appears after the page has scrolled 480 pixels. It scrolls smoothly, or jumps when the browser asks for reduced motion.
 
 ## Problem
 
@@ -157,6 +159,8 @@ A window is inside a preference only when its start and end both fall inside tha
 
 Each window includes US AQI and PM2.5 ranges when known, weather ranges, a ranking explanation, limitations, and retrieval freshness. The planning timeline draws the next 12 local hours and the windows the server returned. Hour cells are not themselves recommendations.
 
+On the dashboard, the activity profile, duration, and time preference are remembered in `localStorage` under `airsense.gowindow` until **Reset activity settings**. A returned schedule is not saved. Changing the place or the profile clears any on-screen schedule so a stale result is not shown.
+
 ## Family Assistant
 
 The Family Assistant builds one household plan from the selected location. The browser sends coordinates and the household. It does not send air or weather readings, and extra fields are rejected. The server fetches the forecast itself and runs the same exposure engine used everywhere else.
@@ -166,6 +170,8 @@ A household lists age-band counts, one sensitivity, up to four routines, and one
 Walking and cycling are independent of that outing. Walking is scored as `daily activities` for the governing profile. Cycling is scored as `cycling` for the same profile. Each is eligible only when its own recommendation is `suitable` or `caution`. `avoid` and `insufficient_data` are not eligible. A less restrictive adult result is recorded separately and is not the household decision.
 
 Every plan reports indoor air as not measured and emissions as qualitative. At-home guidance, routine recommendations, and short explanations of why those actions can help are included from the same plan. Missing or stale data does not turn that guidance into a favorable outing.
+
+The household counts, sensitivity, routines, outing duration, and time preference are remembered in `localStorage` under `airsense.family.household` until **Reset household**. Personal fields such as names, dates of birth, addresses, and diagnoses are not collected or stored.
 
 ### Explain using AI
 
@@ -265,9 +271,23 @@ AI_MAX_OUTPUT_TOKENS=1024
 
 ## Privacy and security
 
-Browser geolocation is optional. On a first visit the dashboard explains the request and continues on Chennai immediately. If this browser has already allowed location, the current place is loaded automatically and the explanation is not shown again. Otherwise, granting permission loads local air and weather. The browser may ask BigDataCloud directly for a city, region, and country. That request does not pass through the AirSense server. Denying or dismissing location keeps Chennai and does not ask again in this browser. A searched city stays until it is cleared or you choose "Back to my location."
+Browser geolocation is optional. On a first visit the dashboard explains the request and continues on Chennai immediately. If this browser has already allowed location, the current place is loaded automatically and the permission question is not shown again. Otherwise, granting permission loads local air and weather. The browser may ask BigDataCloud directly for a city, region, and country. That request does not pass through the AirSense server. Denying or dismissing location keeps Chennai and does not ask again in this browser. A searched city overrides GPS on a new visit and stays until **Clear saved place** or **Back to my location**.
 
-The assistant and GoWindow send coordinates, the question, and the profile. They do not send air or weather readings. The server fetches Open-Meteo itself and ignores client-supplied measurements. Coordinates are rounded to two decimal places, about 1 km, before the bounded cache key is formed. The selected place, the family household, and the GoWindow activity, duration, and time preference stay in this browser until you clear them. Closing the tab does not remove them. **Clear saved place**, **Reset household**, and **Reset activity settings** remove those choices. Forecast results, air-quality readings, and explanations are not stored. None of these choices are written to a database. Section open and closed choices still use `sessionStorage` for the current tab.
+Client-side storage, all in this browser only and not written to a database:
+
+| Key | Storage | What it holds |
+|---|---|---|
+| `airsense.manual` | `localStorage` | A searched place (coordinates and label). |
+| `airsense.gps` | `localStorage` | The saved GPS fix (coordinates and label). |
+| `airsense.family.household` | `localStorage` | The family household form (counts, sensitivity, routines, outing duration, time preference). |
+| `airsense.gowindow` | `localStorage` | GoWindow activity profile, duration, and time preference. |
+| `airsense.geoAsked` | `localStorage` | Whether the location prompt was already shown or dismissed in this browser. |
+| `airsense.theme` | `localStorage` | Light, dark, or system theme. |
+| `airsense.sections` | `sessionStorage` | Which dashboard sections are open or collapsed in the current tab. |
+
+A value that still lived only in `sessionStorage` from an older tab is copied into `localStorage` once when the dashboard reads it, then the tab copy is removed.
+
+The assistant and GoWindow send coordinates, the question, and the profile. They do not send air or weather readings. The server fetches Open-Meteo itself and ignores client-supplied measurements. Coordinates are rounded to two decimal places, about 1 km, before the bounded cache key is formed. Forecast results, air-quality readings, family plans, and explanations are not stored in the browser.
 
 API protections:
 
@@ -307,13 +327,13 @@ In production, Express serves the Vite build from `dist/` and the API on the sam
 ## Demo walkthrough
 
 1. Install and start the app with the commands in [Run locally](#run-locally). Leave `AI_API_KEY` empty for the deterministic path.
-2. Open `http://localhost:5173`. Chennai loads without granting location. The overview shows a modelled US AQI estimate, retrieval timing, and activity guidance. The hourly forecast, GoWindow, Family, pollutants, and assistant sections are collapsed.
-3. Open GoWindow from its header or the navigation link. Keep the daytime preference, choose a duration from 15 to 180 minutes, and request windows. Compare a returned window with the current overview: the window does not rewrite the current recommendation.
-4. Open Family air plan. The default household is one young child, children's outdoor play, 45 minutes, and daytime. Choose **Update family plan**. The decision, outing windows, and walking and cycling results appear. No explanation is shown yet.
+2. Open `http://localhost:5173`. Chennai loads without granting location on a first visit. If this browser has already allowed location, the current place appears with a GPS badge and no permission banner. The overview shows a modelled US AQI estimate, retrieval timing, and activity guidance. The hourly forecast, GoWindow, Family, pollutants, and assistant sections start collapsed.
+3. Open GoWindow from its header or the navigation link. Change activity, duration, or time preference, then choose a duration from 15 to 180 minutes and request windows. Compare a returned window with the current overview: the window does not rewrite the current recommendation.
+4. Open Family air plan. The default household is one young child, children's outdoor play, 45 minutes, and daytime. Change a count or routine, then choose **Update family plan**. The decision, outing windows, and walking and cycling results appear. No explanation is shown yet.
 5. Choose **Explain using AI**. With no API key, the deterministic explanation appears without an origin label. With a key, an accepted reply is labelled **AI-generated**. A reply that fails validation is replaced by the deterministic explanation and is not labelled as AI-generated. The household decision stays the one the exposure engine returned.
-6. Scroll down until **Back to top** appears at the bottom-right, then use it to return to the overview. Collapse a section you opened. Reload the tab and confirm that section choice is still there. A saved place, household, and GoWindow activity settings remain after the tab is closed until you clear them. The forecast itself is requested again.
-7. Change activity, age group, or sensitivity and ask the assistant a short question. The recommendation matches the exposure engine. With no key, the response mode is `rules`.
-8. Deny location, or search another city, and confirm the dashboard names the source of the place. A failed lookup stays on an honest unavailable state rather than a fabricated reading.
+6. Scroll down until **Back to top** appears at the bottom-right, then use it to return to the overview. Collapse a section you opened. Reload the tab and confirm that section choice is still there. Close the tab and open the app again: the saved place, household, and GoWindow activity settings should still be there. The forecast itself is fetched again.
+7. Use **Clear saved place**, **Reset household**, or **Reset activity settings** when those controls appear. Reload and confirm Chennai, the default household, and the default GoWindow profile return.
+8. Search another city and confirm the dashboard shows a SELECTED badge. Choose **Back to my location** when a GPS fix is saved. Deny location on a first visit and confirm the dashboard stays honest when data cannot be loaded.
 
 This repository does not include demo screenshots.
 
@@ -367,13 +387,13 @@ Render supplies `PORT`. The server binds `0.0.0.0`. Optional rate-limit, cache, 
 
 ## Repository compliance checklist
 
-Observed on `main` at `3729fa1` during the 27 November 2026 repository audit, before this README edit. Application code was not changed afterward.
+Observed on `main` at `d15dbc6` (27 November 2026). This README describes the dashboard through that commit, including durable place, household, and GoWindow preferences and automatic loading when location permission is already granted.
 
 - [x] Public GitHub repository
 - [x] Exactly one branch (`main`)
 - [x] Repository under 10 MB. GitHub reported 885 KB. `node_modules` and `dist` are uncommitted
 - [x] `.env` and API keys excluded. `.env.example` has an empty `AI_API_KEY`
-- [x] `npm test` passes. `npm run check` passed on this application tree before the README edit
+- [x] `npm test` passes. `npm run check` passed on this application tree (341 tests, typecheck, and production build)
 - [x] `npm run build` passes, as part of that same `npm run check`
 - [x] README included
 - [ ] Demo screenshots included
