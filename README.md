@@ -12,7 +12,7 @@ The dashboard opens on Chennai without an account. On a first visit it explains 
 
 The saved place, the family household form, and the GoWindow activity profile, duration, and time preference stay in `localStorage` until you clear them. Closing the tab does not remove them. Use **Clear saved place**, **Reset household**, or **Reset activity settings** to return those choices to the defaults. Forecast results, air-quality readings, family plans, and explanations are not stored in the browser.
 
-The current modelled air quality, weather, location, and alert banners stay open. The hourly forecast, GoWindow, Family air plan, pollutant breakdown, and Ask AirSense AI sections start collapsed. Each header opens and closes that section, and the choice is kept in `sessionStorage` for the browser tab under `airsense.sections`. A floating **Back to top** button appears after the page has scrolled 480 pixels. It scrolls smoothly, or jumps when the browser asks for reduced motion.
+The current modelled air quality, weather, location, and alert banners stay open, and so do the 12-hour hourly forecast and the pollutant breakdown. They cannot be collapsed. The pollutant breakdown sits above the **Plan your day** cards. Two cards choose what to plan, and nothing is shown until you click one: **Plan the day for you** shows only GoWindow, and **Plan the day for your entire family** shows only the Family air plan. The choice is not saved, so every page load starts with neither planner shown. The GoWindow and Family navigation links switch to their card. The chosen planner and Ask AirSense AI start collapsed. Each header opens and closes that section, and the choice is kept in `sessionStorage` for the browser tab under `airsense.sections`. A floating **Back to top** button appears after the page has scrolled 480 pixels. It scrolls smoothly, or jumps when the browser asks for reduced motion.
 
 ## Problem
 
@@ -26,7 +26,7 @@ An AQI category does not say whether a particular outdoor activity is suitable, 
 - **Missing data stays missing.** A missing US AQI is unavailable, not clean. Missing PM2.5, missing weather, and conflicting duplicate hours are disclosed and are not treated as favorable.
 - **US AQI stays on the US scale.** European AQI is requested from the provider only so it can be ignored. It is never displayed or converted.
 - **Time preferences filter windows after the safety decision.** Morning, afternoon, evening, and daytime do not relax an exposure threshold.
-- **A household does not get a second score.** Young children and older children both use the existing child profile. Walking and cycling are separate engine results. An adult result is not permission for a child.
+- **A household does not get a second score.** Every age group present (children, older adults, adults) is scored by the existing engine at the shared outing, and the household takes the most protective result. Young children and older children both use the existing child profile. Walking and cycling are scored for every group present and follow the most protective one. An adult result is not permission for a child.
 
 ## Data sources and limitations
 
@@ -167,7 +167,7 @@ The Family Assistant builds one household plan from the selected location. The b
 
 A household lists age-band counts, one sensitivity, up to four routines, and one shared outing of 15 to 180 minutes. Age bands are `young_child`, `older_child`, `adult`, and `older_adult`. Both child bands use the engine's child profile. There is no separate child score. When a child is present, the shared outing is children's outdoor play. An adult-only household uses the first configured routine in the existing priority order. Commuting, when selected, is an adult-only result and does not apply to children.
 
-Walking and cycling are independent of that outing. Walking is scored as `daily activities` for the governing profile. Cycling is scored as `cycling` for the same profile. Each is eligible only when its own recommendation is `suitable` or `caution`. `avoid` and `insufficient_data` are not eligible. A less restrictive adult result is recorded separately and is not the household decision.
+Walking and cycling are independent of that outing. Walking is scored as `daily activities` and cycling as `cycling` for every age group present, and the most protective result applies. Each is eligible only when that result is `suitable` or `caution`. `avoid` and `insufficient_data` are not eligible. The response includes a `members` list with each group's recommendation and which group governs (`basis.householdRule` is `most_protective_member`), and the Family panel shows that list. An unknown result counts as the most protective.
 
 Every plan reports indoor air as not measured and emissions as qualitative. At-home guidance, routine recommendations, and short explanations of why those actions can help are included from the same plan. Missing or stale data does not turn that guidance into a favorable outing.
 
@@ -175,7 +175,7 @@ The household counts, sensitivity, routines, outing duration, and time preferenc
 
 ### Explain using AI
 
-Updating the family plan asks for the deterministic plan. The dashboard shows the household decision, activity recommendations, and schedule, and it does not show an explanation yet. **Explain using AI** sends the same household with `explain: true`.
+**Get the Latest Plan** asks for the deterministic plan. The dashboard shows the household decision, activity recommendations, and schedule, and it does not show an explanation yet. **Explain using AI** sends the same household with `explain: true`.
 
 The explanation object has only `mode` and `text`:
 
@@ -185,7 +185,7 @@ The explanation object has only `mode` and `text`:
 | `rules` | The deterministic explanation, with no origin label. This is also the result when `AI_API_KEY` is unset, and Gemini is not called. |
 | `rules-fallback` | The same deterministic explanation, with no origin label. The explanation was requested, but it was not accepted: the provider call failed, the reply failed validation, or the local gate declined it before Gemini. |
 
-The interface does not badge the deterministic text as AI-generated. Beneath a shown explanation, the dashboard says the safety decision stays with the exposure engine. A failed network request leaves the plan in place, reports that the AI explanation is unavailable, and does not substitute a local explanation. Changing the household or updating the plan clears the explanation that was on screen. The family explanation is one Gemini attempt. It does not retry.
+The interface does not badge the deterministic text as AI-generated. Above the explanation text, a short disclaimer says the explanation describes the plan and does not choose the safety decision. A failed network request leaves the plan in place, reports that the AI explanation is unavailable, and does not substitute a local explanation. Changing the household or updating the plan clears the explanation that was on screen. The family explanation is one Gemini attempt. It does not retry.
 
 ### Request
 
@@ -283,7 +283,7 @@ Client-side storage, all in this browser only and not written to a database:
 | `airsense.gowindow` | `localStorage` | GoWindow activity profile, duration, and time preference. |
 | `airsense.geoAsked` | `localStorage` | Whether the location prompt was already shown or dismissed in this browser. |
 | `airsense.theme` | `localStorage` | Light, dark, or system theme. |
-| `airsense.sections` | `sessionStorage` | Which dashboard sections are open or collapsed in the current tab. |
+| `airsense.sections` | `sessionStorage` | Which of GoWindow, the Family air plan, and Ask AirSense AI are open or collapsed in the current tab. |
 
 A value that still lived only in `sessionStorage` from an older tab is copied into `localStorage` once when the dashboard reads it, then the tab copy is removed.
 
@@ -327,10 +327,10 @@ In production, Express serves the Vite build from `dist/` and the API on the sam
 ## Demo walkthrough
 
 1. Install and start the app with the commands in [Run locally](#run-locally). Leave `AI_API_KEY` empty for the deterministic path.
-2. Open `http://localhost:5173`. Chennai loads without granting location on a first visit. If this browser has already allowed location, the current place appears with a GPS badge and no permission banner. The overview shows a modelled US AQI estimate, retrieval timing, and activity guidance. The hourly forecast, GoWindow, Family, pollutants, and assistant sections start collapsed.
-3. Open GoWindow from its header or the navigation link. Change activity, duration, or time preference, then choose a duration from 15 to 180 minutes and request windows. Compare a returned window with the current overview: the window does not rewrite the current recommendation.
-4. Open Family air plan. The default household is one young child, children's outdoor play, 45 minutes, and daytime. Change a count or routine, then choose **Update family plan**. The decision, outing windows, and walking and cycling results appear. No explanation is shown yet.
-5. Choose **Explain using AI**. With no API key, the deterministic explanation appears without an origin label. With a key, an accepted reply is labelled **AI-generated**. A reply that fails validation is replaced by the deterministic explanation and is not labelled as AI-generated. The household decision stays the one the exposure engine returned.
+2. Open `http://localhost:5173`. Chennai loads without granting location on a first visit. If this browser has already allowed location, the current place appears with a GPS badge and no permission banner. The overview shows a modelled US AQI estimate, retrieval timing, and activity guidance. The hourly forecast and pollutant breakdown are always open. No planner card is selected, and Ask AirSense AI starts collapsed.
+3. Under **Plan your day**, choose **Plan the day for you** and open GoWindow from its header or the navigation link. Only GoWindow is shown. Change activity, duration, or time preference, then choose a duration from 15 to 180 minutes and request windows. Compare a returned window with the current overview: the window does not rewrite the current recommendation.
+4. Choose **Plan the day for your entire family** and open Family air plan. Only the Family air plan is shown. Reload and confirm no card is selected. The default household is one young child, children's outdoor play, 45 minutes, and daytime. Change a count or routine, then choose **Get the Latest Plan**. The decision, outing windows, and walking and cycling results appear. No explanation is shown yet.
+5. Choose **Explain using AI**. With no API key, the deterministic explanation appears without an origin label. With a key, an accepted reply is labelled **AI-generated**. A reply that fails validation is replaced by the deterministic explanation and is not labelled as AI-generated. The household decision on screen stays the one the exposure engine returned.
 6. Scroll down until **Back to top** appears at the bottom-right, then use it to return to the overview. Collapse a section you opened. Reload the tab and confirm that section choice is still there. Close the tab and open the app again: the saved place, household, and GoWindow activity settings should still be there. The forecast itself is fetched again.
 7. Use **Clear saved place**, **Reset household**, or **Reset activity settings** when those controls appear. Reload and confirm Chennai, the default household, and the default GoWindow profile return.
 8. Search another city and confirm the dashboard shows a SELECTED badge. Choose **Back to my location** when a GPS fix is saved. Deny location on a first visit and confirm the dashboard stays honest when data cannot be loaded.

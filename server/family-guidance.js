@@ -276,8 +276,8 @@ export function familyRulesExplanation(plan) {
   const known = recommendation === "suitable" || recommendation === "caution" || recommendation === "avoid" || recommendation === "insufficient_data";
   const decisionWord = known ? String(recommendation).replaceAll("_", " ") : "insufficient data";
   const child = plan?.basis?.childPresent === true
-    ? "A child is in the household, so outdoor play follows the child profile. An adult result is not permission for the child."
-    : "No child profile is governing this outing.";
+    ? "Every age group in the household is checked and the most protective result applies. An adult result is not permission for the child."
+    : "Every age group in the household is checked and the most protective result applies.";
   const schedule = String(plan?.schedule?.status || "insufficient_data").replaceAll("_", " ");
   const scheduleSentence = recommendation === "insufficient_data"
     ? "The outing schedule is withheld because the current data is not usable."
