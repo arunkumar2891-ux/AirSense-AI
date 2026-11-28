@@ -910,6 +910,7 @@ app.post("/api/family-plan", rateLimiters.familyPlan.middleware, async (req, res
       ok: true,
       governingProfile: plan.governingProfile,
       basis: plan.basis,
+      members: plan.members,
       decision: plan.decision,
       schedule: plan.schedule,
       adultOnlyCommute: plan.adultOnlyCommute,

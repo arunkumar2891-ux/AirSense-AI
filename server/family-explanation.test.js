@@ -430,7 +430,7 @@ test("walking and cycling permission follows the governing traveler", () => {
     validateExplanation(lead + "Adults may head out, so the kids can walk to school.", familyContext(plan({
       basis: {
         childPresent: true,
-        adultSharedOutdoor: { activityRecommendation: "suitable", usedForHouseholdDecision: false },
+        householdRule: "most_protective_member",
       },
     }))),
     /child's outdoor activity/i,

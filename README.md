@@ -26,7 +26,7 @@ An AQI category does not say whether a particular outdoor activity is suitable, 
 - **Missing data stays missing.** A missing US AQI is unavailable, not clean. Missing PM2.5, missing weather, and conflicting duplicate hours are disclosed and are not treated as favorable.
 - **US AQI stays on the US scale.** European AQI is requested from the provider only so it can be ignored. It is never displayed or converted.
 - **Time preferences filter windows after the safety decision.** Morning, afternoon, evening, and daytime do not relax an exposure threshold.
-- **A household does not get a second score.** Young children and older children both use the existing child profile. Walking and cycling are separate engine results. An adult result is not permission for a child.
+- **A household does not get a second score.** Every age group present (children, older adults, adults) is scored by the existing engine at the shared outing, and the household takes the most protective result. Young children and older children both use the existing child profile. Walking and cycling are scored for every group present and follow the most protective one. An adult result is not permission for a child.
 
 ## Data sources and limitations
 
@@ -167,7 +167,7 @@ The Family Assistant builds one household plan from the selected location. The b
 
 A household lists age-band counts, one sensitivity, up to four routines, and one shared outing of 15 to 180 minutes. Age bands are `young_child`, `older_child`, `adult`, and `older_adult`. Both child bands use the engine's child profile. There is no separate child score. When a child is present, the shared outing is children's outdoor play. An adult-only household uses the first configured routine in the existing priority order. Commuting, when selected, is an adult-only result and does not apply to children.
 
-Walking and cycling are independent of that outing. Walking is scored as `daily activities` for the governing profile. Cycling is scored as `cycling` for the same profile. Each is eligible only when its own recommendation is `suitable` or `caution`. `avoid` and `insufficient_data` are not eligible. A less restrictive adult result is recorded separately and is not the household decision.
+Walking and cycling are independent of that outing. Walking is scored as `daily activities` and cycling as `cycling` for every age group present, and the most protective result applies. Each is eligible only when that result is `suitable` or `caution`. `avoid` and `insufficient_data` are not eligible. The response includes a `members` list with each group's recommendation and which group governs (`basis.householdRule` is `most_protective_member`), and the Family panel shows that list. An unknown result counts as the most protective.
 
 Every plan reports indoor air as not measured and emissions as qualitative. At-home guidance, routine recommendations, and short explanations of why those actions can help are included from the same plan. Missing or stale data does not turn that guidance into a favorable outing.
 

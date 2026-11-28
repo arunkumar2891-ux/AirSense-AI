@@ -256,15 +256,45 @@ function knownRecommendation(value: string | undefined): value is "suitable" | "
   return value === "suitable" || value === "caution" || value === "avoid" || value === "insufficient_data";
 }
 
+const MEMBER_GROUP_LABEL: Record<string, string> = {
+  child: "Children",
+  "older adult": "Older adults",
+  adult: "Adults",
+};
+
+function memberGroupLabel(ageGroup: string | undefined, count: number | undefined) {
+  const base = ageGroup && Object.prototype.hasOwnProperty.call(MEMBER_GROUP_LABEL, ageGroup) ? MEMBER_GROUP_LABEL[ageGroup] : "";
+  if (!base) return "";
+  return typeof count === "number" && Number.isInteger(count) && count > 0 ? `${base} (${count})` : base;
+}
+
+type MemberView = { key: string; label: string; recommendationLabel: string; governs: boolean };
+
+function memberViews(members: { ageGroup?: string; count?: number; activityRecommendation?: string; governs?: boolean }[] | undefined): MemberView[] {
+  if (!Array.isArray(members)) return [];
+  const views = members.flatMap((member) => {
+    const label = memberGroupLabel(member?.ageGroup, member?.count);
+    if (!label || typeof member.ageGroup !== "string") return [];
+    return [{
+      key: member.ageGroup,
+      label,
+      recommendationLabel: recommendationLabel(member.activityRecommendation),
+      governs: member.governs === true,
+    }];
+  });
+  const differ = views.some((view) => view.recommendationLabel !== views[0].recommendationLabel);
+  return views.map((view) => ({ ...view, governs: view.governs && differ }));
+}
+
 function travelView(item: NonNullable<FamilyPlanResponse["activeTravel"]>["walking"]) {
   const recommendation = item?.decision?.activityRecommendation;
   const eligible = item?.eligible === true && (recommendation === "suitable" || recommendation === "caution");
   return {
     eligible,
     eligibilityLabel: eligible ? "Eligible" : "Not eligible",
-    ageGroup: item?.profile?.ageGroup || "Unavailable",
     engineActivity: item?.engineActivity || "Unavailable",
     recommendationLabel: recommendationLabel(recommendation),
+    members: memberViews(item?.members),
   };
 }
 
@@ -276,9 +306,10 @@ export type FamilyPlanView = {
   action: string;
   reasoning: string;
   factors: { factor: string; detail: string }[];
-  governingProfile: string;
+  outingProfile: string;
+  members: MemberView[];
+  householdRuleNote: string;
   childPresent: boolean;
-  adultComparisonNote: string | null;
   scheduleStatus: string;
   commute: {
     label: "Adult-only commute";
@@ -348,10 +379,7 @@ export function presentFamilyPlan(plan: FamilyPlanResponse | null | undefined): 
     return { ok: false, message: "The family plan response could not be shown." };
   }
   const childPresent = plan.basis?.childPresent === true;
-  const adult = plan.basis?.adultSharedOutdoor;
-  const adultComparisonNote = childPresent && adult
-    ? "An adult result is recorded separately and is not this household's decision."
-    : null;
+  const members = memberViews(plan.members);
   const commuteDecision = plan.adultOnlyCommute?.decision;
   const routineCards = guidanceCards(plan.routineRecommendations);
   const indoorCards = guidanceCards(plan.indoorGuidance?.recommendations);
@@ -376,9 +404,12 @@ export function presentFamilyPlan(plan: FamilyPlanResponse | null | undefined): 
     factors: (decision.trace?.factors || [])
       .filter((factor) => factor && typeof factor.factor === "string")
       .map((factor) => ({ factor: factor.factor, detail: text(factor.detail) || "No detail returned." })),
-    governingProfile: [plan.governingProfile?.activity, plan.governingProfile?.ageGroup, plan.governingProfile?.sensitivity].filter(Boolean).join(" · ") || "Unavailable",
+    outingProfile: [plan.governingProfile?.activity, plan.governingProfile?.sensitivity].filter(Boolean).join(" · ") || "Unavailable",
+    members,
+    householdRuleNote: members.length > 1
+      ? "Every household member group is checked. The most protective result applies to the household."
+      : "The household decision uses the profile of the only member group.",
     childPresent,
-    adultComparisonNote,
     scheduleStatus: plan.schedule.status,
     commute: plan.adultOnlyCommute ? {
       label: "Adult-only commute",

@@ -1585,7 +1585,7 @@ export function buildFamilyClaims(plan) {
   if (plan?.basis?.childPresent === true) {
     claims.push({
       id: "household_child_rule",
-      text: "A child is in the household, so the outing uses the child profile and an adult result is not permission for the child.",
+      text: "Every age group in the household is checked and the most protective result applies, so an adult result is not permission for the child.",
     });
   }
   claims.push({ id: "current_exposure_decision", text: `The deterministic activity recommendation is ${decision}.` });

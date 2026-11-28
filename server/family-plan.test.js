@@ -116,8 +116,14 @@ test("an adult shared result cannot replace a stricter child decision", () => {
   }, NOW);
   assert.equal(result.decision.activityRecommendation, "avoid");
   assert.equal(adult.activityRecommendation, "caution");
-  assert.equal(result.basis.adultSharedOutdoor.usedForHouseholdDecision, false);
-  assert.equal(result.basis.adultSharedOutdoor.lessRestrictiveThanGoverning, true);
+  assert.equal(result.basis.householdRule, "most_protective_member");
+  assert.equal(result.basis.adultSharedOutdoor, undefined);
+  const childMember = result.members.find((member) => member.ageGroup === "child");
+  const adultMember = result.members.find((member) => member.ageGroup === "adult");
+  assert.equal(childMember.activityRecommendation, "avoid");
+  assert.equal(childMember.governs, true);
+  assert.equal(adultMember.activityRecommendation, adult.activityRecommendation);
+  assert.equal(adultMember.governs, false);
   assert.notEqual(result.decision.activityRecommendation, adult.activityRecommendation);
   assert.equal(result.sentences.includes("outing_avoid"), true);
   assert.equal(result.sentences.includes("indoor_limit_outdoor_air"), true);
@@ -135,7 +141,7 @@ test("an adult-only household uses older adult when that band is present", () =>
   assert.equal(result.governingProfile.ageGroup, "older adult");
   assert.equal(result.basis.governingReason, "older_adult_present");
   assert.equal(result.basis.activitySource, "routine");
-  assert.equal(result.basis.adultSharedOutdoor, null);
+  assert.deepEqual(result.members.map((member) => member.ageGroup), ["older adult", "adult"]);
   assert.equal(result.sentences.includes("household_child_rule"), false);
   assert.equal(result.decision.trace.factors.some((factor) => factor.factor === "Age"), false);
 });
@@ -366,6 +372,81 @@ test("child plus adult and child plus older adult keep the child profile", () =>
   assert.equal(withOlder.governingProfile.ageGroup, "child");
   assert.equal(withOlder.basis.counts.older_child, 2);
   assert.notEqual(withOlder.governingProfile.ageGroup, "older adult");
+});
+
+test("every age group in the household is scored and the most protective result is the decision", () => {
+  const reading = current({ aqi: 40, pollutants: { pm25: 160, pm10: 180 } });
+  const mixed = plan({ current: reading }, {
+    members: [
+      { ageBand: "young_child", count: 1 },
+      { ageBand: "older_child", count: 1 },
+      { ageBand: "adult", count: 2 },
+      { ageBand: "older_adult", count: 1 },
+    ],
+  });
+  assert.equal(mixed.ok, true);
+  assert.deepEqual(mixed.members.map((member) => member.ageGroup), ["child", "older adult", "adult"]);
+  assert.deepEqual(mixed.members.map((member) => member.count), [2, 1, 2]);
+  assert.deepEqual(mixed.members[0].ageBands, [{ ageBand: "young_child", count: 1 }, { ageBand: "older_child", count: 1 }]);
+  for (const member of mixed.members) {
+    assert.deepEqual(member.profile, {
+      activity: "children's outdoor play",
+      ageGroup: member.ageGroup,
+      sensitivity: "general",
+    });
+    assert.deepEqual(
+      { recommendation: member.activityRecommendation, risk: member.overallRisk },
+      (({ activityRecommendation, overallRisk }) => ({ recommendation: activityRecommendation, risk: overallRisk }))(
+        buildExposureDecision(reading, member.profile, NOW),
+      ),
+    );
+  }
+  const order = { suitable: 0, caution: 1, avoid: 2, insufficient_data: 3 };
+  const strictest = Math.max(...mixed.members.map((member) => order[member.activityRecommendation]));
+  assert.equal(order[mixed.decision.activityRecommendation], strictest);
+  assert.equal(mixed.members.filter((member) => member.governs).length, 1);
+  assert.equal(mixed.basis.householdRule, "most_protective_member");
+});
+
+test("walking and cycling are scored for every member group and follow the most protective one", () => {
+  const reading = current({ aqi: 80, pollutants: { pm25: 36, pm10: 40 } });
+  const mixed = plan({ current: reading }, {
+    members: [{ ageBand: "young_child", count: 1 }, { ageBand: "adult", count: 2 }, { ageBand: "older_adult", count: 1 }],
+  });
+  const order = { suitable: 0, caution: 1, avoid: 2, insufficient_data: 3 };
+  for (const [name, activity] of [["walking", "daily activities"], ["cycling", "cycling"]]) {
+    const travel = mixed.activeTravel[name];
+    assert.deepEqual(travel.members.map((member) => member.ageGroup), ["child", "older adult", "adult"]);
+    for (const member of travel.members) {
+      const direct = buildExposureDecision(reading, { activity, ageGroup: member.ageGroup, sensitivity: "general" }, NOW);
+      assert.equal(member.activityRecommendation, direct.activityRecommendation);
+    }
+    const strictest = Math.max(...travel.members.map((member) => order[member.activityRecommendation]));
+    assert.equal(order[travel.decision.activityRecommendation], strictest);
+    assert.equal(travel.eligible, strictest <= 1);
+    assert.equal(travel.members.filter((member) => member.governs).length, 1);
+  }
+});
+
+test("a child result is never less protective than an older adult or adult result for the same outing", () => {
+  const order = { suitable: 0, caution: 1, avoid: 2, insufficient_data: 3 };
+  const activities = ["children's outdoor play", "daily activities", "running", "cycling", "commuting"];
+  const sensitivities = ["general", "respiratory sensitivity", "heart or lung condition"];
+  for (const activity of activities) {
+    for (const sensitivity of sensitivities) {
+      for (const aqi of [10, 40, 60, 90, 110, 140, 160, 190, 220, 320]) {
+        for (const pm25 of [4, 20, 40, 70, 120, 200]) {
+          for (const wind of [2, 12]) {
+            const reading = current({ aqi, pollutants: { pm25, pm10: pm25 + 5 }, weather: { wind_speed_10m: wind, temperature_2m: 30 } });
+            const [child, older, adult] = ["child", "older adult", "adult"].map((ageGroup) =>
+              order[buildExposureDecision(reading, { activity, ageGroup, sensitivity }, NOW).activityRecommendation]);
+            assert.ok(child >= older, `child ${child} older ${older} for ${activity} ${sensitivity} aqi ${aqi} pm ${pm25}`);
+            assert.ok(older >= adult, `older ${older} adult ${adult} for ${activity} ${sensitivity} aqi ${aqi} pm ${pm25}`);
+          }
+        }
+      }
+    }
+  }
 });
 
 test("adult-only and older-adult-only profiles stay on general activities", () => {

@@ -181,13 +181,18 @@ export default function FamilyPanel({
               <b>{view.recommendationLabel}</b>
               <span>Risk: {view.riskLabel}</span>
             </p>
-            <p>Governing profile: {view.governingProfile}</p>
+            <p>Outing: {view.outingProfile}</p>
+            {view.members.length > 0 && <ul className="family-members" aria-label="Result for each household member group">
+              {view.members.map((member) => <li key={member.key}>
+                <b>{member.label}:</b> {member.recommendationLabel}{member.governs ? " (most protective, applies to the household)" : ""}
+              </li>)}
+            </ul>}
             <p>{view.action}</p>
             <p>{view.reasoning}</p>
             {view.factors.length > 0 && <ul aria-label="Decision trace">
               {view.factors.map((factor) => <li key={factor.factor}><b>{factor.factor}.</b> {factor.detail}</li>)}
             </ul>}
-            {view.adultComparisonNote && <p className="family-disclaimer">{view.adultComparisonNote}</p>}
+            <p className="family-disclaimer">{view.householdRuleNote}</p>
             {view.recommendation === "insufficient_data" && <p className="family-disclaimer">Insufficient data. No favorable outing is shown for this household.</p>}
           </section>
           <section className="family-block" aria-labelledby="family-windows-title">
@@ -212,8 +217,15 @@ export default function FamilyPanel({
           </section>}
           <section className="family-block" aria-labelledby="family-travel-title">
             <h3 id="family-travel-title">Walking and cycling</h3>
-            <p>Walking: {view.walking.eligibilityLabel}. Traveler age group: {view.walking.ageGroup}. Recommendation: {view.walking.recommendationLabel}.</p>
-            <p>Cycling: {view.cycling.eligibilityLabel}. Traveler age group: {view.cycling.ageGroup}. Recommendation: {view.cycling.recommendationLabel}.</p>
+            {(["walking", "cycling"] as const).map((mode) => {
+              const travel = view[mode];
+              return <div key={mode} className="family-travel">
+                <p>{mode === "walking" ? "Walking" : "Cycling"}: {travel.eligibilityLabel}. Most protective recommendation: {travel.recommendationLabel}.</p>
+                {travel.members.length > 1 && <ul className="family-members" aria-label={`${mode} result for each household member group`}>
+                  {travel.members.map((member) => <li key={member.key}><b>{member.label}:</b> {member.recommendationLabel}</li>)}
+                </ul>}
+              </div>;
+            })}
           </section>
           {view.explanation && <section className="family-block" aria-labelledby="family-explanation-title">
             <h3 id="family-explanation-title">Explanation of your family plan</h3>

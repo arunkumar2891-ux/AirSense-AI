@@ -42,10 +42,11 @@ function plan(overrides = {}) {
   return {
     ok: true,
     governingProfile: { activity: "children's outdoor play", ageGroup: "child", sensitivity: "general" },
-    basis: {
-      childPresent: true,
-      adultSharedOutdoor: { usedForHouseholdDecision: false, activityRecommendation: "suitable", lessRestrictiveThanGoverning: true },
-    },
+    basis: { childPresent: true, householdRule: "most_protective_member" },
+    members: [
+      { ageGroup: "child", count: 2, activityRecommendation: "avoid", governs: true },
+      { ageGroup: "adult", count: 2, activityRecommendation: "caution", governs: false },
+    ],
     decision: decision("avoid"),
     schedule: {
       status: "insufficient_data",
@@ -60,7 +61,7 @@ function plan(overrides = {}) {
       decision: decision("caution", { recommendedAction: "Adult commute action" }),
     },
     activeTravel: {
-      walking: { eligible: false, engineActivity: "daily activities", profile: { ageGroup: "child", activity: "daily activities", sensitivity: "general" }, decision: decision("avoid") },
+      walking: { eligible: false, engineActivity: "daily activities", profile: { ageGroup: "child", activity: "daily activities", sensitivity: "general" }, decision: decision("avoid"), members: [{ ageGroup: "child", activityRecommendation: "avoid", governs: true }, { ageGroup: "adult", activityRecommendation: "caution", governs: false }] },
       cycling: { eligible: false, engineActivity: "cycling", profile: { ageGroup: "child", activity: "cycling", sensitivity: "general" }, decision: decision("avoid") },
     },
     sentences: ["indoor_unmeasured", "indoor_limit_outdoor_air", "emissions_unquantified", "active_travel_walking_withheld", "shared_trip"],
@@ -209,9 +210,20 @@ test("a child plan stays avoid when an adult result is suitable, and insufficien
   assert.equal(view.recommendation, "avoid");
   assert.equal(view.recommendationLabel, "Avoid");
   assert.notEqual(view.recommendation, "suitable");
-  assert.match(view.adultComparisonNote, /not this household's decision/);
+  assert.equal(view.outingProfile, "children's outdoor play · general");
+  assert.deepEqual(view.members.map((member) => [member.label, member.recommendationLabel, member.governs]), [
+    ["Children (2)", "Avoid", true],
+    ["Adults (2)", "Caution", false],
+  ]);
+  assert.match(view.householdRuleNote, /most protective result applies/);
+  const equal = presentFamilyPlan(plan({ members: [
+    { ageGroup: "child", count: 1, activityRecommendation: "suitable", governs: true },
+    { ageGroup: "adult", count: 1, activityRecommendation: "suitable", governs: false },
+  ] }));
+  assert.equal(equal.members.some((member) => member.governs), false);
+  assert.equal(JSON.stringify(view).includes("recorded separately"), false);
   assert.equal(view.walking.eligible, false);
-  assert.equal(view.walking.ageGroup, "child");
+  assert.deepEqual(view.walking.members.map((member) => [member.label, member.recommendationLabel]), [["Children", "Avoid"], ["Adults", "Caution"]]);
   assert.equal(view.cycling.eligible, false);
   assert.equal(view.commute.label, "Adult-only commute");
   assert.equal(view.commute.appliesToChildren, false);
@@ -357,6 +369,8 @@ test("family controls, persistence, and stale-result handling stay in the dashbo
   assert.match(app, /FAMILY_STORAGE_KEY/);
   assert.match(app, /writePreference\(localStorage, sessionStorage, FAMILY_STORAGE_KEY/);
   assert.match(panel, /Reset household/);
+  assert.match(panel, /Result for each household member group/);
+  assert.doesNotMatch(panel, /Governing profile|recorded separately|Traveler age group/);
   assert.match(app, /familyAbortRef\.current\?\.abort\(\)/);
   assert.match(app, /isLatestRequest\(requestId, familyRequestRef\.current\)/);
   assert.match(app, /setFamilyPlan\(null\)/);

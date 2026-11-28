@@ -308,17 +308,23 @@ export type FamilyExplanation = {
   text: string;
 };
 
+export type FamilyMemberResult = {
+  ageGroup?: string;
+  count?: number;
+  profile?: Profile;
+  activityRecommendation?: string;
+  overallRisk?: string;
+  governs?: boolean;
+};
+
 export type FamilyPlanResponse = {
   ok: boolean;
   governingProfile?: Profile;
   basis?: {
     childPresent?: boolean;
-    adultSharedOutdoor?: {
-      usedForHouseholdDecision?: boolean;
-      activityRecommendation?: string;
-      lessRestrictiveThanGoverning?: boolean;
-    } | null;
+    householdRule?: string;
   };
+  members?: FamilyMemberResult[];
   decision?: ExposureDecision;
   schedule?: GoWindowResponse;
   adultOnlyCommute?: {
@@ -333,12 +339,14 @@ export type FamilyPlanResponse = {
       profile?: Profile;
       decision?: ExposureDecision;
       eligible?: boolean;
+      members?: { ageGroup?: string; activityRecommendation?: string; governs?: boolean }[];
     };
     cycling?: {
       engineActivity?: string;
       profile?: Profile;
       decision?: ExposureDecision;
       eligible?: boolean;
+      members?: { ageGroup?: string; activityRecommendation?: string; governs?: boolean }[];
     };
   };
   sentences?: string[];

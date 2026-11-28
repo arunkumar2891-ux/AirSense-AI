@@ -39,7 +39,12 @@ const MAX_DURATION_MINUTES = 180;
 const MAX_MEMBER_COUNT = 8;
 const MAX_HOUSEHOLD_COUNT = 12;
 const MAX_ROUTINES = 4;
-const RECOMMENDATION_RANK = { suitable: 0, caution: 1, avoid: 2 };
+// Every age group present is scored with the existing engine. The household
+// takes the most protective result, and an unknown result counts as the most
+// protective. Ties go to the earliest group listed here, which is also the
+// group the engine weighs most heavily.
+const MEMBER_GROUP_ORDER = Object.freeze(["child", "older adult", "adult"]);
+const RESTRICTION_RANK = { suitable: 0, caution: 1, avoid: 2, insufficient_data: 3 };
 
 const HOUSEHOLD_KEYS = new Set(["members", "sensitivity", "routines", "outing"]);
 const MEMBER_KEYS = new Set(["ageBand", "count"]);
@@ -57,9 +62,38 @@ function unknownKeys(value, allowed) {
   return Object.keys(value).filter((key) => !allowed.has(key));
 }
 
-function lessRestrictive(other, governing) {
-  if (!Object.hasOwn(RECOMMENDATION_RANK, other) || !Object.hasOwn(RECOMMENDATION_RANK, governing)) return false;
-  return RECOMMENDATION_RANK[other] < RECOMMENDATION_RANK[governing];
+function restrictionRank(decision) {
+  const recommendation = decision?.activityRecommendation;
+  return Object.hasOwn(RESTRICTION_RANK, recommendation) ? RESTRICTION_RANK[recommendation] : RESTRICTION_RANK.insufficient_data;
+}
+
+function mostProtective(results) {
+  return results.reduce((best, result) => (restrictionRank(result.decision) > restrictionRank(best.decision) ? result : best));
+}
+
+function memberGroups(counts) {
+  const groups = [];
+  for (const ageGroup of MEMBER_GROUP_ORDER) {
+    const ageBands = Object.keys(AGE_BAND_TO_GROUP)
+      .filter((ageBand) => AGE_BAND_TO_GROUP[ageBand] === ageGroup && counts[ageBand] > 0)
+      .map((ageBand) => ({ ageBand, count: counts[ageBand] }));
+    if (ageBands.length > 0) {
+      groups.push({ ageGroup, ageBands, count: ageBands.reduce((sum, band) => sum + band.count, 0) });
+    }
+  }
+  return groups;
+}
+
+function memberSummary(result, governing) {
+  return {
+    ageGroup: result.ageGroup,
+    ageBands: result.ageBands,
+    count: result.count,
+    profile: result.profile,
+    activityRecommendation: result.decision.activityRecommendation,
+    overallRisk: result.decision.overallRisk,
+    governs: result === governing,
+  };
 }
 
 function eligible(decision) {
@@ -145,15 +179,10 @@ function selectSharedActivity(childPresent, routines) {
   return { activity: GENERAL_ACTIVITY, source: "general_default" };
 }
 
-function governingAge(counts) {
-  const childCount = counts.young_child + counts.older_child;
-  if (childCount > 0) {
-    return { ageGroup: "child", reason: "child_present" };
-  }
-  if (counts.older_adult > 0) {
-    return { ageGroup: "older adult", reason: "older_adult_present" };
-  }
-  return { ageGroup: "adult", reason: "adult_only" };
+function governingReason(governingGroup, groups) {
+  if (governingGroup === "child") return "child_present";
+  if (governingGroup === "older adult") return "older_adult_present";
+  return groups.length > 1 ? "adult_most_protective" : "adult_only";
 }
 
 function currentReading(forecast) {
@@ -162,14 +191,22 @@ function currentReading(forecast) {
   return plainObject(forecast?.current) ? forecast.current : {};
 }
 
-function travelResult(current, profile, activity, now) {
-  const traveler = { ...profile, activity };
-  const decision = buildExposureDecision(current, traveler, now);
+function travelResult(current, groups, sensitivity, activity, now) {
+  const results = groups.map((group) => {
+    const profile = { activity, ageGroup: group.ageGroup, sensitivity };
+    return { ageGroup: group.ageGroup, profile, decision: buildExposureDecision(current, profile, now) };
+  });
+  const governing = mostProtective(results);
   return {
     engineActivity: activity,
-    profile: traveler,
-    decision,
-    eligible: eligible(decision),
+    profile: governing.profile,
+    decision: governing.decision,
+    eligible: eligible(governing.decision),
+    members: results.map((result) => ({
+      ageGroup: result.ageGroup,
+      activityRecommendation: result.decision.activityRecommendation,
+      governs: result === governing,
+    })),
   };
 }
 
@@ -200,7 +237,8 @@ function sentenceIds({ childPresent, decision, schedule, walking, cycling, commu
  * Plan one household from an already fetched forecast and a household
  * configuration. This function does not fetch data, score with new weights,
  * or call Gemini. Shared outdoor time uses the existing exposure engine and
- * GoWindow. A child profile is never replaced by an adult result.
+ * GoWindow. Every age group present is scored, and the household takes the
+ * most protective result, so an adult result never replaces a stricter one.
  */
 /** Returns the household unchanged when it matches the planner allowlist. */
 export function validateHouseholdPlan(household) {
@@ -215,14 +253,15 @@ export function buildHouseholdPlan({ forecast, household, now } = {}) {
   if (parsed.error) return invalid(parsed.error);
 
   const childPresent = parsed.counts.young_child + parsed.counts.older_child > 0;
-  const age = governingAge(parsed.counts);
-  const governingProfile = {
-    activity: parsed.shared.activity,
-    ageGroup: age.ageGroup,
-    sensitivity: parsed.sensitivity,
-  };
+  const groups = memberGroups(parsed.counts);
   const current = currentReading(forecast);
-  const decision = buildExposureDecision(current, governingProfile, now);
+  const evaluated = groups.map((group) => {
+    const profile = { activity: parsed.shared.activity, ageGroup: group.ageGroup, sensitivity: parsed.sensitivity };
+    return { ...group, profile, decision: buildExposureDecision(current, profile, now) };
+  });
+  const governing = mostProtective(evaluated);
+  const governingProfile = governing.profile;
+  const decision = governing.decision;
   const schedule = findGoWindows({
     forecast,
     profile: governingProfile,
@@ -230,22 +269,6 @@ export function buildHouseholdPlan({ forecast, household, now } = {}) {
     timePreference: parsed.timePreference,
     now,
   });
-
-  let adultSharedOutdoor = null;
-  if (childPresent) {
-    const adultProfile = {
-      activity: CHILD_ACTIVITY,
-      ageGroup: "adult",
-      sensitivity: parsed.sensitivity,
-    };
-    const adultDecision = buildExposureDecision(current, adultProfile, now);
-    adultSharedOutdoor = {
-      usedForHouseholdDecision: false,
-      profile: adultProfile,
-      activityRecommendation: adultDecision.activityRecommendation,
-      lessRestrictiveThanGoverning: lessRestrictive(adultDecision.activityRecommendation, decision.activityRecommendation),
-    };
-  }
 
   const adultOnlyCommute = parsed.routines.includes("commuting")
     ? {
@@ -262,8 +285,8 @@ export function buildHouseholdPlan({ forecast, household, now } = {}) {
 
   const activeTravel = {
     travelerUsesGoverningProfile: true,
-    walking: travelResult(current, governingProfile, WALKING_ACTIVITY, now),
-    cycling: travelResult(current, governingProfile, CYCLING_ACTIVITY, now),
+    walking: travelResult(current, groups, parsed.sensitivity, WALKING_ACTIVITY, now),
+    cycling: travelResult(current, groups, parsed.sensitivity, CYCLING_ACTIVITY, now),
   };
 
   return {
@@ -273,12 +296,13 @@ export function buildHouseholdPlan({ forecast, household, now } = {}) {
       childPresent,
       counts: parsed.counts,
       childBandsUseEngineAgeGroup: "child",
-      governingReason: age.reason,
+      householdRule: "most_protective_member",
+      governingReason: governingReason(governing.ageGroup, groups),
       sensitivity: parsed.sensitivity,
       sharedActivity: parsed.shared.activity,
       activitySource: parsed.shared.source,
-      adultSharedOutdoor,
     },
+    members: evaluated.map((result) => memberSummary(result, governing)),
     decision,
     schedule,
     adultOnlyCommute,
