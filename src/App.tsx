@@ -8,6 +8,8 @@ import { buildGoWindowRequest, DEFAULT_GO_WINDOW_DURATION, DEFAULT_TIME_PREFEREN
 import { FAMILY_STORAGE_KEY, buildFamilyPlanRequest, canApplyFamilyExplanation, canStartFamilyExplanation, defaultFamilyHousehold, familyPlanForDisplay, familyPlanRequestKey, readStoredHousehold, serializeFamilyHousehold, type FamilyDraft } from "./family";
 import { expandSection, readSectionExpanded, sectionFromHash, toggleSection, writeSectionExpanded, type SectionId } from "./sections";
 import GoWindowPanel from "./GoWindowPanel";
+import PlannerModePicker from "./PlannerModePicker";
+import { PLANNER_MODE_KEY, plannerModeForSection, plannerSectionForMode, readPlannerMode, type PlannerMode } from "./planner-mode";
 import FamilyPanel from "./FamilyPanel";
 import CollapsibleSection from "./CollapsibleSection";
 import BackToTop from "./BackToTop";
@@ -116,7 +118,16 @@ function App() {
   const [sections, setSections] = useState(() => {
     try { return readSectionExpanded(sessionStorage); } catch { return readSectionExpanded(null); }
   });
+  const [plannerMode, setPlannerMode] = useState<PlannerMode>(() => {
+    try { return readPlannerMode(readPreference(localStorage, sessionStorage, PLANNER_MODE_KEY)); } catch { return readPlannerMode(null); }
+  });
   const [clockNow, setClockNow] = useState(() => Date.now());
+
+  function choosePlannerMode(mode: PlannerMode) {
+    setPlannerMode(mode);
+    writePreference(localStorage, sessionStorage, PLANNER_MODE_KEY, mode);
+    openDashboardSection(plannerSectionForMode(mode));
+  }
 
   function toggleDashboardSection(id: SectionId) {
     setSections((current) => {
@@ -127,6 +138,11 @@ function App() {
   }
 
   function openDashboardSection(id: SectionId) {
+    const mode = plannerModeForSection(id);
+    if (mode) {
+      setPlannerMode(mode);
+      writePreference(localStorage, sessionStorage, PLANNER_MODE_KEY, mode);
+    }
     setSections((current) => {
       const next = expandSection(current, id);
       if (next === current) return current;
@@ -702,7 +718,8 @@ function App() {
           <div className="chart-legend"><span><i/> US AQI forecast</span><span className="muted">Modelled forecast · not a station observation</span></div>
         </CollapsibleSection>
       </section>
-      <GoWindowPanel
+      <PlannerModePicker mode={plannerMode} onChange={choosePlannerMode}/>
+      {plannerMode === "self" && <GoWindowPanel
         locationLabel={loc.source === "default" ? "Default · Chennai" : loc.label}
         profile={profile}
         onProfileChange={setProfile}
@@ -720,8 +737,8 @@ function App() {
         onReset={resetGoWindow}
         expanded={sections.gowindow}
         onToggle={() => toggleDashboardSection("gowindow")}
-      />
-      <FamilyPanel
+      />}
+      {plannerMode === "family" && <FamilyPanel
         locationLabel={loc.source === "default" ? "Default · Chennai" : loc.label}
         household={household}
         onHouseholdChange={updateHousehold}
@@ -737,7 +754,7 @@ function App() {
         onReset={resetHousehold}
         expanded={sections.family}
         onToggle={() => toggleDashboardSection("family")}
-      />
+      />}
       <CollapsibleSection
         id="pollutants"
         titleId="pollutants-title"
