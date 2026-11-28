@@ -547,7 +547,7 @@ describe("family plan route", { concurrency: 1 }, () => {
     assert.equal(rejected.body.activeTravel.walking.eligible, false);
     assert.equal(rejected.body.activeTravel.cycling.eligible, false);
     assert.doesNotMatch(rejected.body.explanation.text, /\b(?:suitable|safe|fine|okay|acceptable)\b/i);
-    assert.equal(geminiCalls.length, 1);
+    assert.equal(geminiCalls.length, 2);
     const rejectedBody = JSON.stringify(rejected.body);
     assert.equal(rejectedBody.includes("ClaimValidation"), false);
     assert.equal(rejectedBody.includes("Explanation permits"), false);

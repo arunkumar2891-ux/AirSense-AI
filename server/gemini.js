@@ -1738,12 +1738,33 @@ function familySystemPrompt(plan, claims) {
     ...travelPromptLines("walking", walking),
     ...travelPromptLines("cycling", cycling),
     ...activityFidelityLines(plan),
+    "Whenever you use a recommendation word, name the activity it belongs to, such as children's outdoor play, walking, or cycling, or call it the household decision.",
+    "Do not attach a recommendation word to a generic phrase such as outdoor plan, outing, outside, or outdoors.",
     "Indoor air has not been measured.",
     "Emissions comments must stay qualitative.",
     "An adult result is not permission for a child.",
     ...childOutdoorClosureLines(plan),
     "Write one concise, friendly explanation for a family.",
   ].join("\n");
+}
+
+// A rejected draft earns one new sample. The sampling is not deterministic, and
+// every sample still has to pass the same check before it is shown.
+const MAX_FAMILY_REGENERATIONS = 1;
+
+function isRejectedDraft(error) {
+  return error?.name === "ClaimValidation" || error?.name === "RecommendationMismatch";
+}
+
+// Only fixed text is sent back. The rejected draft itself never is.
+function rejectionNote(error) {
+  const reason = error?.name === "RecommendationMismatch"
+    ? "its recommendation did not match the supplied activityRecommendation"
+    : safeClaimReason(error)?.replace(/\.$/, "").toLowerCase();
+  return [
+    `A previous draft was rejected by the safety check${reason ? `: ${reason}` : ""}.`,
+    "Write a new explanation that fixes this. Name each activity beside its own recommendation, and do not use a generic phrase such as outdoor plan, outing, or outside with a recommendation word.",
+  ].join(" ");
 }
 
 export async function explainFamilyPlan(plan) {
@@ -1761,44 +1782,73 @@ export async function explainFamilyPlan(plan) {
   }
   const decision = plan?.decision || { activityRecommendation: "insufficient_data" };
   const deadlineAt = Date.now() + AI_CONFIG.timeoutMs;
-  const start = Date.now();
-  const controller = new AbortController();
-  let response;
-  try {
-    response = await runWithDeadline(
-      () => getClient().models.generateContent({
+  const systemPrompt = familySystemPrompt(plan, claims);
+  let transientRetries = 0;
+  let regenerations = 0;
+  let rejection = null;
+  for (let attempt = 0; ; attempt++) {
+    const remainingMs = deadlineAt - Date.now();
+    if (remainingMs <= 0) break;
+    const start = Date.now();
+    const controller = new AbortController();
+    let response;
+    try {
+      response = await runWithDeadline(
+        () => getClient().models.generateContent({
+          model: AI_CONFIG.model,
+          contents: [{ role: "user", parts: [{ text: serialized }] }],
+          config: {
+            systemInstruction: rejection ? `${systemPrompt}\n${rejectionNote(rejection)}` : systemPrompt,
+            ...structuredExplanationConfig(),
+            httpOptions: { timeout: Math.max(1, deadlineAt - Date.now()) },
+            abortSignal: controller.signal,
+          },
+        }),
+        remainingMs,
+        () => controller.abort(),
+      );
+      const structured = parseStructuredResponse(response?.text || "", decision, claims, {}, null, {
+        question: FAMILY_EXPLAIN_QUESTION,
+        family: plan,
+        place: familyResolvedPlace(plan),
+      });
+      logAI({ model: AI_CONFIG.model, latencyMs: Date.now() - start, success: true, mode: "ai", attempt });
+      return { mode: "ai", text: structured.explanation };
+    } catch (error) {
+      logAI({
         model: AI_CONFIG.model,
-        contents: [{ role: "user", parts: [{ text: serialized }] }],
-        config: {
-          systemInstruction: familySystemPrompt(plan, claims),
-          ...structuredExplanationConfig(),
-          httpOptions: { timeout: Math.max(1, deadlineAt - Date.now()) },
-          abortSignal: controller.signal,
-        },
-      }),
-      Math.max(0, deadlineAt - Date.now()),
-      () => controller.abort(),
-    );
-    const structured = parseStructuredResponse(response?.text || "", decision, claims, {}, null, {
-      question: FAMILY_EXPLAIN_QUESTION,
-      family: plan,
-      place: familyResolvedPlace(plan),
-    });
-    logAI({ model: AI_CONFIG.model, latencyMs: Date.now() - start, success: true, mode: "ai", attempt: 0 });
-    return { mode: "ai", text: structured.explanation };
-  } catch (error) {
-    logAI({
-      model: AI_CONFIG.model,
-      latencyMs: Date.now() - start,
-      success: false,
-      mode: "rules-fallback",
-      attempt: 0,
-      errorType: error?.name || "Error",
-      reason: safeClaimReason(error),
-      ...(response ? { diagnostics: responseDiagnostics(response) } : {}),
-    });
-    return { mode: "rules-fallback", text };
+        latencyMs: Date.now() - start,
+        success: false,
+        mode: "rules-fallback",
+        attempt,
+        errorType: error?.name || "Error",
+        reason: safeClaimReason(error),
+        ...(response ? { diagnostics: responseDiagnostics(response) } : {}),
+      });
+      if (isRejectedDraft(error) && regenerations < MAX_FAMILY_REGENERATIONS) {
+        regenerations += 1;
+        rejection = error;
+        continue;
+      }
+      if (!isRejectedDraft(error) && isTransient(error) && transientRetries < AI_CONFIG.maxRetries) {
+        const baseDelay = 500 * 2 ** transientRetries;
+        transientRetries += 1;
+        const remainingAfterAttempt = deadlineAt - Date.now();
+        if (remainingAfterAttempt <= 0) break;
+        try {
+          await runWithDeadline(
+            () => (AI_CONFIG.sleep || sleep)(baseDelay + Math.random() * baseDelay),
+            remainingAfterAttempt,
+          );
+        } catch {
+          break;
+        }
+        continue;
+      }
+      break;
+    }
   }
+  return { mode: "rules-fallback", text };
 }
 
 // ---------- Public API ----------

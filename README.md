@@ -185,7 +185,7 @@ The explanation object has only `mode` and `text`:
 | `rules` | The deterministic explanation, with no origin label. This is also the result when `AI_API_KEY` is unset, and Gemini is not called. |
 | `rules-fallback` | The same deterministic explanation, with no origin label. The explanation was requested, but it was not accepted: the provider call failed, the reply failed validation, or the local gate declined it before Gemini. |
 
-The interface does not badge the deterministic text as AI-generated. Above the explanation text, a short disclaimer says the explanation describes the plan and does not choose the safety decision. A failed network request leaves the plan in place, reports that the AI explanation is unavailable, and does not substitute a local explanation. Changing the household or updating the plan clears the explanation that was on screen. The family explanation is one Gemini attempt. It does not retry.
+The interface does not badge the deterministic text as AI-generated. Above the explanation text, a short disclaimer says the explanation describes the plan and does not choose the safety decision. A failed network request leaves the plan in place, reports that the AI explanation is unavailable, and does not substitute a local explanation. Changing the household or updating the plan clears the explanation that was on screen. The family explanation retries a transient provider error (429, 500, 503) up to `AI_MAX_RETRIES` times with backoff, and asks once more after a draft is rejected by the check. The second request carries only a fixed reason, never the rejected text, and its answer must pass the same check. All attempts share the `AI_TIMEOUT_MS` deadline. If none passes, the deterministic explanation is returned.
 
 ### Request
 

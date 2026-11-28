@@ -10,6 +10,15 @@ let behavior = { type: "success" };
 class FakeModels {
   async generateContent(args) {
     calls.push(args);
+    if (behavior.type === "sequence") {
+      const step = behavior.steps[Math.min(calls.length - 1, behavior.steps.length - 1)];
+      if (step.error) {
+        const error = new Error(step.error);
+        if (step.status) error.status = step.status;
+        throw error;
+      }
+      return { text: JSON.stringify(step.body) };
+    }
     if (behavior.type === "hang") return new Promise(() => {});
     if (behavior.type === "error") {
       const error = new Error("503 Service Unavailable");
@@ -84,6 +93,7 @@ test.beforeEach(() => {
   AI_CONFIG.apiKey = "test-key";
   AI_CONFIG.timeoutMs = originalTimeout;
   AI_CONFIG.maxRetries = 2;
+  AI_CONFIG.sleep = async () => {};
   process.env.AI_API_KEY = "test-key";
 });
 
@@ -91,6 +101,7 @@ test.after(() => {
   AI_CONFIG.apiKey = originalKey;
   AI_CONFIG.timeoutMs = originalTimeout;
   AI_CONFIG.maxRetries = originalRetries;
+  AI_CONFIG.sleep = null;
   if (originalEnvKey === undefined) delete process.env.AI_API_KEY;
   else process.env.AI_API_KEY = originalEnvKey;
   _setClientFactory(null);
@@ -181,13 +192,14 @@ test("timeout, provider errors, and malformed output keep the deterministic expl
   const failed = await explainFamilyPlan(household);
   assert.equal(failed.mode, "rules-fallback");
   assert.equal(failed.text, expected);
-  assert.equal(calls.length, 1);
+  assert.equal(calls.length, 1 + AI_CONFIG.maxRetries);
 
   calls = [];
   behavior = { type: "malformed" };
   const malformed = await explainFamilyPlan(household);
   assert.equal(malformed.mode, "rules-fallback");
   assert.equal(malformed.text, expected);
+  assert.equal(calls.length, 2);
   assert.equal(household.decision.activityRecommendation, "avoid");
 });
 
@@ -784,7 +796,81 @@ test("existing valid explanations pass and a failed check returns the full deter
   assert.equal(household.decision, decision);
   assert.equal(household.schedule, schedule);
   assert.equal(household.decision.activityRecommendation, "avoid");
+  assert.equal(calls.length, 2);
+});
+
+test("a transient provider error is retried and the family explanation still passes the check", async () => {
+  const household = plan();
+  behavior = { type: "sequence", steps: [
+    { error: "503 The model is overloaded.", status: 503 },
+    { error: "429 Resource exhausted.", status: 429 },
+    { body: modelBody(validExplanation) },
+  ] };
+  const result = await explainFamilyPlan(household);
+  assert.equal(result.mode, "ai");
+  assert.equal(result.text, validExplanation);
+  assert.equal(calls.length, 3);
+  assert.equal(calls.every((call) => !call.config.systemInstruction.includes("previous draft")), true);
+});
+
+test("a provider error that is not transient is not retried", async () => {
+  const household = plan();
+  behavior = { type: "sequence", steps: [{ error: "400 Invalid argument.", status: 400 }] };
+  const result = await explainFamilyPlan(household);
+  assert.equal(result.mode, "rules-fallback");
+  assert.equal(result.text, familyRulesExplanation(household));
   assert.equal(calls.length, 1);
+});
+
+test("a rejected draft earns one regeneration that carries a fixed reason and never the draft", async () => {
+  const household = plan();
+  const rejectedDraft = `${validExplanation} Still a good time for the kids to play in the park.`;
+  behavior = { type: "sequence", steps: [
+    { body: modelBody(rejectedDraft) },
+    { body: modelBody(validExplanation) },
+  ] };
+  const result = await explainFamilyPlan(household);
+  assert.equal(result.mode, "ai");
+  assert.equal(result.text, validExplanation);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].config.systemInstruction.includes("previous draft"), false);
+  const retryPrompt = calls[1].config.systemInstruction;
+  assert.match(retryPrompt, /A previous draft was rejected by the safety check: /);
+  assert.match(retryPrompt, /Name each activity beside its own recommendation/);
+  assert.equal(retryPrompt.includes("park"), false);
+  assert.equal(calls[1].contents[0].parts[0].text, calls[0].contents[0].parts[0].text);
+});
+
+test("a recommendation mismatch is regenerated once, and a second bad draft falls back", async () => {
+  const household = plan();
+  behavior = { type: "sequence", steps: [
+    { body: modelBody(validExplanation, "suitable") },
+    { body: modelBody(validExplanation, "suitable") },
+  ] };
+  const result = await explainFamilyPlan(household);
+  assert.equal(result.mode, "rules-fallback");
+  assert.equal(result.text, familyRulesExplanation(household));
+  assert.equal(calls.length, 2);
+  assert.match(calls[1].config.systemInstruction, /did not match the supplied activityRecommendation/);
+  assert.equal(household.decision.activityRecommendation, "avoid");
+});
+
+test("retries stop at the shared deadline", async () => {
+  const household = plan();
+  AI_CONFIG.timeoutMs = 1000;
+  behavior = { type: "hang" };
+  const started = Date.now();
+  const result = await explainFamilyPlan(household);
+  assert.equal(result.mode, "rules-fallback");
+  assert.equal(calls.length, 1);
+  assert.ok(Date.now() - started < 3000);
+});
+
+test("the family prompt tells the model to name the activity beside each recommendation word", async () => {
+  await explainFamilyPlan(plan());
+  const prompt = calls[0].config.systemInstruction;
+  assert.match(prompt, /Whenever you use a recommendation word, name the activity it belongs to, such as children's outdoor play, walking, or cycling, or call it the household decision\./);
+  assert.match(prompt, /Do not attach a recommendation word to a generic phrase such as outdoor plan, outing, outside, or outdoors\./);
 });
 
 test("child outing descriptions are rejected without a permission cue", () => {
