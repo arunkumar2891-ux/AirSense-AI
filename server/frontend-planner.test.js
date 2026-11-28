@@ -21,13 +21,14 @@ async function compile(relativePath, cache = new Map()) {
   return url;
 }
 
-test("planner mode defaults to GoWindow and ignores unknown saved values", async () => {
-  const { readPlannerMode, DEFAULT_PLANNER_MODE } = await import(await compile("planner-mode.ts"));
-  assert.equal(DEFAULT_PLANNER_MODE, "self");
-  assert.equal(readPlannerMode(null), "self");
-  assert.equal(readPlannerMode(undefined), "self");
-  assert.equal(readPlannerMode(""), "self");
-  assert.equal(readPlannerMode("both"), "self");
+test("no planner is chosen until the user picks one", async () => {
+  const planner = await import(await compile("planner-mode.ts"));
+  const { readPlannerMode } = planner;
+  assert.equal(Object.hasOwn(planner, "DEFAULT_PLANNER_MODE"), false);
+  assert.equal(readPlannerMode(null), null);
+  assert.equal(readPlannerMode(undefined), null);
+  assert.equal(readPlannerMode(""), null);
+  assert.equal(readPlannerMode("both"), null);
   assert.equal(readPlannerMode("self"), "self");
   assert.equal(readPlannerMode("family"), "family");
 });
@@ -45,6 +46,7 @@ test("each planner mode maps to exactly one dashboard section", async () => {
 test("the dashboard shows only the chosen planner and keeps the choice", async () => {
   const app = await readFile(new URL("../src/App.tsx", import.meta.url), "utf8");
   const picker = await readFile(new URL("../src/PlannerModePicker.tsx", import.meta.url), "utf8");
+  assert.match(app, /useState<PlannerMode \| null>/);
   assert.match(app, /plannerMode === "self" && <GoWindowPanel/);
   assert.match(app, /plannerMode === "family" && <FamilyPanel/);
   assert.match(app, /writePreference\(localStorage, sessionStorage, PLANNER_MODE_KEY/);

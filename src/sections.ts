@@ -1,4 +1,4 @@
-export const SECTION_IDS = ["hourly", "gowindow", "family", "pollutants", "assistant"] as const;
+export const SECTION_IDS = ["gowindow", "family", "assistant"] as const;
 
 export type SectionId = (typeof SECTION_IDS)[number];
 
@@ -7,10 +7,8 @@ export type SectionExpanded = Record<SectionId, boolean>;
 export const SECTION_STORAGE_KEY = "airsense.sections";
 
 export const DEFAULT_SECTION_EXPANDED: SectionExpanded = {
-  hourly: false,
   gowindow: false,
   family: false,
-  pollutants: false,
   assistant: false,
 };
 

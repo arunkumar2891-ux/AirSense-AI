@@ -4,8 +4,6 @@ export const PLANNER_MODE_KEY = "airsense.plannerMode";
 
 export type PlannerMode = "self" | "family";
 
-export const DEFAULT_PLANNER_MODE: PlannerMode = "self";
-
 export const PLANNER_MODES: readonly {
   id: PlannerMode;
   title: string;
@@ -26,8 +24,9 @@ export const PLANNER_MODES: readonly {
   },
 ];
 
-export function readPlannerMode(raw: string | null | undefined): PlannerMode {
-  return raw === "self" || raw === "family" ? raw : DEFAULT_PLANNER_MODE;
+// No card is chosen until the user picks one, so an unknown value is no choice.
+export function readPlannerMode(raw: string | null | undefined): PlannerMode | null {
+  return raw === "self" || raw === "family" ? raw : null;
 }
 
 export function plannerModeForSection(id: SectionId): PlannerMode | null {

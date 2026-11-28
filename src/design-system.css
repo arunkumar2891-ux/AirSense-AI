@@ -1274,3 +1274,6 @@ html[data-theme="dark"] .planner-card.selected { background: var(--surface-subtl
 @media (max-width: 640px) {
   .planner-cards { grid-template-columns: minmax(0, 1fr); }
 }
+.section-static { display: flex; align-items: flex-start; gap: 10px; margin: 0; padding: 2px; }
+.section-static > .muted { flex: none; }
+.planner-hint { margin: 10px 0 0; color: var(--text-secondary); font-size: 13px; }

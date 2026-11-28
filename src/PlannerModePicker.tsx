@@ -3,7 +3,7 @@ import { PLANNER_MODES, type PlannerMode } from "./planner-mode";
 
 const ICONS = { self: Clock, family: Users } as const;
 
-export default function PlannerModePicker({ mode, onChange }: { mode: PlannerMode; onChange: (mode: PlannerMode) => void }) {
+export default function PlannerModePicker({ mode, onChange }: { mode: PlannerMode | null; onChange: (mode: PlannerMode) => void }) {
   return <fieldset className="planner-picker">
     <legend className="section-kicker">PLAN YOUR DAY</legend>
     <div className="planner-cards">
@@ -28,5 +28,6 @@ export default function PlannerModePicker({ mode, onChange }: { mode: PlannerMod
         </label>;
       })}
     </div>
+    {mode === null && <p className="planner-hint">Choose one to see its plan.</p>}
   </fieldset>;
 }

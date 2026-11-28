@@ -12,7 +12,7 @@ The dashboard opens on Chennai without an account. On a first visit it explains 
 
 The saved place, the family household form, and the GoWindow activity profile, duration, and time preference stay in `localStorage` until you clear them. Closing the tab does not remove them. Use **Clear saved place**, **Reset household**, or **Reset activity settings** to return those choices to the defaults. Forecast results, air-quality readings, family plans, and explanations are not stored in the browser.
 
-The current modelled air quality, weather, location, and alert banners stay open. Under **Plan your day**, two radio cards choose what to plan: **Plan the day for you** shows only GoWindow, and **Plan the day for your entire family** shows only the Family air plan. The choice is saved in `localStorage` as `airsense.plannerMode`, and the GoWindow and Family navigation links switch to their card. GoWindow is the default. The hourly forecast, the chosen planner, pollutant breakdown, and Ask AirSense AI sections start collapsed. Each header opens and closes that section, and the choice is kept in `sessionStorage` for the browser tab under `airsense.sections`. A floating **Back to top** button appears after the page has scrolled 480 pixels. It scrolls smoothly, or jumps when the browser asks for reduced motion.
+The current modelled air quality, weather, location, and alert banners stay open, and so do the 12-hour hourly forecast and the pollutant breakdown. They cannot be collapsed. The pollutant breakdown sits above the **Plan your day** cards. Two radio cards choose what to plan, and neither is selected on a first visit: **Plan the day for you** shows only GoWindow, and **Plan the day for your entire family** shows only the Family air plan. The choice is saved in `localStorage` as `airsense.plannerMode`, and the GoWindow and Family navigation links switch to their card. The chosen planner and Ask AirSense AI start collapsed. Each header opens and closes that section, and the choice is kept in `sessionStorage` for the browser tab under `airsense.sections`. A floating **Back to top** button appears after the page has scrolled 480 pixels. It scrolls smoothly, or jumps when the browser asks for reduced motion.
 
 ## Problem
 
@@ -282,9 +282,9 @@ Client-side storage, all in this browser only and not written to a database:
 | `airsense.family.household` | `localStorage` | The family household form (counts, sensitivity, routines, outing duration, time preference). |
 | `airsense.gowindow` | `localStorage` | GoWindow activity profile, duration, and time preference. |
 | `airsense.geoAsked` | `localStorage` | Whether the location prompt was already shown or dismissed in this browser. |
-| `airsense.plannerMode` | `localStorage` | Whether the planner card shows GoWindow (`self`) or the Family air plan (`family`). |
+| `airsense.plannerMode` | `localStorage` | The planner card the user chose: GoWindow (`self`) or the Family air plan (`family`). Nothing is stored until a card is chosen. |
 | `airsense.theme` | `localStorage` | Light, dark, or system theme. |
-| `airsense.sections` | `sessionStorage` | Which dashboard sections are open or collapsed in the current tab. |
+| `airsense.sections` | `sessionStorage` | Which of GoWindow, the Family air plan, and Ask AirSense AI are open or collapsed in the current tab. |
 
 A value that still lived only in `sessionStorage` from an older tab is copied into `localStorage` once when the dashboard reads it, then the tab copy is removed.
 
@@ -328,7 +328,7 @@ In production, Express serves the Vite build from `dist/` and the API on the sam
 ## Demo walkthrough
 
 1. Install and start the app with the commands in [Run locally](#run-locally). Leave `AI_API_KEY` empty for the deterministic path.
-2. Open `http://localhost:5173`. Chennai loads without granting location on a first visit. If this browser has already allowed location, the current place appears with a GPS badge and no permission banner. The overview shows a modelled US AQI estimate, retrieval timing, and activity guidance. The hourly forecast, GoWindow, Family, pollutants, and assistant sections start collapsed.
+2. Open `http://localhost:5173`. Chennai loads without granting location on a first visit. If this browser has already allowed location, the current place appears with a GPS badge and no permission banner. The overview shows a modelled US AQI estimate, retrieval timing, and activity guidance. The hourly forecast and pollutant breakdown are always open. No planner card is selected, and Ask AirSense AI starts collapsed.
 3. Under **Plan your day**, choose **Plan the day for you** and open GoWindow from its header or the navigation link. Only GoWindow is shown. Change activity, duration, or time preference, then choose a duration from 15 to 180 minutes and request windows. Compare a returned window with the current overview: the window does not rewrite the current recommendation.
 4. Choose **Plan the day for your entire family** and open Family air plan. Only the Family air plan is shown, and the choice is still there after a reload. The default household is one young child, children's outdoor play, 45 minutes, and daytime. Change a count or routine, then choose **Get the Latest Plan**. The decision, outing windows, and walking and cycling results appear. No explanation is shown yet.
 5. Choose **Explain using AI**. With no API key, the deterministic explanation appears without an origin label. With a key, an accepted reply is labelled **AI-generated**. A reply that fails validation is replaced by the deterministic explanation and is not labelled as AI-generated. The household decision on screen stays the one the exposure engine returned.

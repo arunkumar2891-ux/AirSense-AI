@@ -25,10 +25,8 @@ function memoryStorage(initial = {}) {
 test("secondary dashboard sections start collapsed and stay remembered for the session", async () => {
   const sections = await compile("sections.ts");
   assert.deepEqual(sections.DEFAULT_SECTION_EXPANDED, {
-    hourly: false,
     gowindow: false,
     family: false,
-    pollutants: false,
     assistant: false,
   });
   assert.deepEqual(sections.readSectionExpanded(null), sections.DEFAULT_SECTION_EXPANDED);
@@ -44,7 +42,7 @@ test("secondary dashboard sections start collapsed and stay remembered for the s
   const collapsed = sections.toggleSection(opened, "family");
   sections.writeSectionExpanded(storage, collapsed);
   assert.equal(sections.readSectionExpanded(storage).family, false);
-  assert.equal(sections.expandSection(collapsed, "pollutants").pollutants, true);
+  assert.equal(sections.expandSection(collapsed, "assistant").assistant, true);
   assert.equal(sections.expandSection(opened, "family"), opened);
 });
 
@@ -53,10 +51,12 @@ test("invalid section storage falls back to the collapsed defaults", async () =>
   const storage = memoryStorage({ [sections.SECTION_STORAGE_KEY]: "{not json" });
   assert.deepEqual(sections.readSectionExpanded(storage), sections.DEFAULT_SECTION_EXPANDED);
   const partial = memoryStorage({
-    [sections.SECTION_STORAGE_KEY]: JSON.stringify({ hourly: true, family: "yes", extra: true }),
+    [sections.SECTION_STORAGE_KEY]: JSON.stringify({ gowindow: true, hourly: false, family: "yes", extra: true }),
   });
   const read = sections.readSectionExpanded(partial);
-  assert.equal(read.hourly, true);
+  assert.equal(read.gowindow, true);
+  assert.equal(Object.hasOwn(read, "hourly"), false);
+  assert.equal(Object.hasOwn(read, "pollutants"), false);
   assert.equal(read.family, false);
   assert.equal(read.assistant, false);
   assert.equal(sections.sectionFromHash("#family"), "family");
@@ -86,10 +86,16 @@ test("primary safety information stays outside collapsed sections", async () => 
   assert.match(overview, /notice-banner/);
   assert.match(overview, /context-strip/);
   assert.doesNotMatch(overview, /hidden=\{!/);
-  for (const id of ["hourly", "gowindow", "family", "pollutants", "assistant"]) {
+  for (const id of ["gowindow", "family", "assistant"]) {
     assert.match(app, new RegExp(`expanded=\\{sections\\.${id}\\}`));
     assert.match(app, new RegExp(`"${id}"`));
   }
+  for (const id of ["hourly", "pollutants"]) {
+    assert.doesNotMatch(app, new RegExp(`expanded=\\{sections\\.${id}\\}`));
+    assert.match(app, new RegExp(`<section id="${id}"`));
+  }
+  assert.ok(app.indexOf('<section id="pollutants"') < app.indexOf("<PlannerModePicker"));
+  assert.ok(app.indexOf('<section id="hourly"') < app.indexOf('<section id="pollutants"'));
   assert.match(app, /readSectionExpanded\(sessionStorage\)/);
   assert.match(app, /SECTION_STORAGE_KEY|airsense\.sections|writeSectionExpanded/);
   assert.match(panel, /aria-expanded=\{expanded\}/);

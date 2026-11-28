@@ -118,8 +118,8 @@ function App() {
   const [sections, setSections] = useState(() => {
     try { return readSectionExpanded(sessionStorage); } catch { return readSectionExpanded(null); }
   });
-  const [plannerMode, setPlannerMode] = useState<PlannerMode>(() => {
-    try { return readPlannerMode(readPreference(localStorage, sessionStorage, PLANNER_MODE_KEY)); } catch { return readPlannerMode(null); }
+  const [plannerMode, setPlannerMode] = useState<PlannerMode | null>(() => {
+    try { return readPlannerMode(readPreference(localStorage, sessionStorage, PLANNER_MODE_KEY)); } catch { return null; }
   });
   const [clockNow, setClockNow] = useState(() => Date.now());
 
@@ -628,7 +628,7 @@ function App() {
         <a className="nav" href="#overview"><Activity size={17}/> Overview</a>
         <a className="nav" href="#gowindow" onClick={() => openDashboardSection("gowindow")}><Clock size={17}/> GoWindow</a>
         <a className="nav" href="#family" onClick={() => openDashboardSection("family")}><Users size={17}/> Family</a>
-        <a className="nav" href="#pollutants" onClick={() => openDashboardSection("pollutants")}><Compass size={17}/> Pollutants</a>
+        <a className="nav" href="#pollutants"><Compass size={17}/> Pollutants</a>
         <a className="nav" href="#assistant" onClick={() => openDashboardSection("assistant")}><MessageCircle size={17}/> AI Assistant</a>
       </nav>
       <div className="nav-actions">
@@ -706,17 +706,28 @@ function App() {
             {showNonStationSubnote && <small>Not a neighborhood monitoring station observation.</small>}
           </div>
         </div>
-        <CollapsibleSection
-          id="hourly"
-          titleId="hourly-title"
-          className={`insight-card${sections.hourly ? "" : " is-collapsed"}`}
-          expanded={sections.hourly}
-          onToggle={() => toggleDashboardSection("hourly")}
-          header={<><span className="section-toggle-copy"><span className="section-kicker">MODELLED HOURLY ESTIMATES</span><span className="section-title" id="hourly-title">Next 12 hours</span></span><span className="mini-icon"><Activity size={17}/></span></>}
-        >
-          <div className="chart-wrap">{chartData.length ? <ResponsiveContainer width="100%" height="100%"><AreaChart data={chartData}><defs><linearGradient id="aqiFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="var(--blue-readable)" stopOpacity={0.2}/><stop offset="100%" stopColor="var(--blue-readable)" stopOpacity={0}/></linearGradient></defs><CartesianGrid stroke="var(--chart-grid)" vertical={false}/><XAxis dataKey="hour" tick={{ fill: "var(--text-muted)", fontSize: 11 }} axisLine={false} tickLine={false}/><YAxis width={32} domain={[0, (maximum: number) => Math.min(500, Math.max(100, Math.ceil(maximum / 50) * 50))]} tick={{ fill: "var(--text-muted)", fontSize: 11 }} axisLine={false} tickLine={false}/><Tooltip contentStyle={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, color: "var(--text)" }} cursor={{stroke:"var(--border-strong)"}}/><Area type="monotone" dataKey="aqi" stroke="var(--blue-readable)" strokeWidth={2.5} fill="url(#aqiFill)" connectNulls/></AreaChart></ResponsiveContainer> : <div className="chart-empty">{loading ? "Loading model forecast…" : error ? "Forecast unavailable because data could not be loaded." : "Hourly model forecast unavailable."}</div>}</div>
-          <div className="chart-legend"><span><i/> US AQI forecast</span><span className="muted">Modelled forecast · not a station observation</span></div>
-        </CollapsibleSection>
+        <section id="hourly" className="insight-card" aria-labelledby="hourly-title">
+          <div className="section-header">
+            <h2 className="section-heading section-static"><span className="section-toggle-copy"><span className="section-kicker">MODELLED HOURLY ESTIMATES</span><span className="section-title" id="hourly-title">Next 12 hours</span></span><span className="mini-icon"><Activity size={17}/></span></h2>
+          </div>
+          <div className="section-panel">
+            <div className="chart-wrap">{chartData.length ? <ResponsiveContainer width="100%" height="100%"><AreaChart data={chartData}><defs><linearGradient id="aqiFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="var(--blue-readable)" stopOpacity={0.2}/><stop offset="100%" stopColor="var(--blue-readable)" stopOpacity={0}/></linearGradient></defs><CartesianGrid stroke="var(--chart-grid)" vertical={false}/><XAxis dataKey="hour" tick={{ fill: "var(--text-muted)", fontSize: 11 }} axisLine={false} tickLine={false}/><YAxis width={32} domain={[0, (maximum: number) => Math.min(500, Math.max(100, Math.ceil(maximum / 50) * 50))]} tick={{ fill: "var(--text-muted)", fontSize: 11 }} axisLine={false} tickLine={false}/><Tooltip contentStyle={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, color: "var(--text)" }} cursor={{stroke:"var(--border-strong)"}}/><Area type="monotone" dataKey="aqi" stroke="var(--blue-readable)" strokeWidth={2.5} fill="url(#aqiFill)" connectNulls/></AreaChart></ResponsiveContainer> : <div className="chart-empty">{loading ? "Loading model forecast…" : error ? "Forecast unavailable because data could not be loaded." : "Hourly model forecast unavailable."}</div>}</div>
+            <div className="chart-legend"><span><i/> US AQI forecast</span><span className="muted">Modelled forecast · not a station observation</span></div>
+          </div>
+        </section>
+      </section>
+      <section id="pollutants" className="section-block" aria-labelledby="pollutants-title">
+        <div className="section-header">
+          <h2 className="section-heading section-static"><span className="section-toggle-copy"><span className="section-kicker">WHAT'S IN THE AIR</span><span className="section-title" id="pollutants-title">Pollutant breakdown</span></span><span className="muted">Modelled concentration · µg/m³ where applicable</span></h2>
+        </div>
+        <div className="section-panel">
+          <div className="pollutant-grid">
+            <Pollutant name="PM2.5" value={air?.pollutants.pm25} unit="µg/m³" icon={<Cloud/>} desc="Fine particles"/>
+            <Pollutant name="PM10" value={air?.pollutants.pm10} unit="µg/m³" icon={<Wind/>} desc="Coarse particles"/>
+            <Pollutant name="Ozone" value={air?.pollutants.ozone} unit="µg/m³" icon={<Activity/>} desc="Ground-level O₃"/>
+            <Pollutant name="Nitrogen dioxide" value={air?.pollutants.nitrogenDioxide} unit="µg/m³" icon={<Cloud/>} desc="Traffic-related gas"/>
+          </div>
+        </div>
       </section>
       <PlannerModePicker mode={plannerMode} onChange={choosePlannerMode}/>
       {plannerMode === "self" && <GoWindowPanel
@@ -755,21 +766,6 @@ function App() {
         expanded={sections.family}
         onToggle={() => toggleDashboardSection("family")}
       />}
-      <CollapsibleSection
-        id="pollutants"
-        titleId="pollutants-title"
-        className="section-block"
-        expanded={sections.pollutants}
-        onToggle={() => toggleDashboardSection("pollutants")}
-        header={<><span className="section-toggle-copy"><span className="section-kicker">WHAT'S IN THE AIR</span><span className="section-title" id="pollutants-title">Pollutant breakdown</span></span><span className="muted">Modelled concentration · µg/m³ where applicable</span></>}
-      >
-        <div className="pollutant-grid">
-          <Pollutant name="PM2.5" value={air?.pollutants.pm25} unit="µg/m³" icon={<Cloud/>} desc="Fine particles"/>
-          <Pollutant name="PM10" value={air?.pollutants.pm10} unit="µg/m³" icon={<Wind/>} desc="Coarse particles"/>
-          <Pollutant name="Ozone" value={air?.pollutants.ozone} unit="µg/m³" icon={<Activity/>} desc="Ground-level O₃"/>
-          <Pollutant name="Nitrogen dioxide" value={air?.pollutants.nitrogenDioxide} unit="µg/m³" icon={<Cloud/>} desc="Traffic-related gas"/>
-        </div>
-      </CollapsibleSection>
       <CollapsibleSection
         id="assistant"
         titleId="assistant-title"
