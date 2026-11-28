@@ -219,7 +219,6 @@ export default function FamilyPanel({
             <h3 id="family-explanation-title">Explanation of your family plan</h3>
             <p className="family-disclaimer">This explanation describes the family plan. It does not choose the safety decision.</p>
             {view.explanation.label && <p className="family-explanation-label">{view.explanation.label}</p>}
-            <p className="family-disclaimer">{view.explanation.note}</p>
             <p>{view.explanation.text}</p>
           </section>}
           {explainLoading && <p className="family-status" role="status">Writing the AI explanation.</p>}

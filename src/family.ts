@@ -297,7 +297,6 @@ export type FamilyPlanView = {
     mode: "ai" | "rules" | "rules-fallback";
     text: string;
     label: string | null;
-    note: string;
   } | null;
 };
 
@@ -339,7 +338,6 @@ function presentExplanation(value: FamilyPlanResponse["explanation"]) {
     mode: value.mode,
     text: body,
     label: value.mode === "ai" ? "AI-generated" : null,
-    note: "The safety decision stays with the exposure engine.",
   };
 }
 
