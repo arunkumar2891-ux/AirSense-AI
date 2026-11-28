@@ -175,7 +175,7 @@ The household counts, sensitivity, routines, outing duration, and time preferenc
 
 ### Explain using AI
 
-Updating the family plan asks for the deterministic plan. The dashboard shows the household decision, activity recommendations, and schedule, and it does not show an explanation yet. **Explain using AI** sends the same household with `explain: true`.
+**Get the Latest Plan** asks for the deterministic plan. The dashboard shows the household decision, activity recommendations, and schedule, and it does not show an explanation yet. **Explain using AI** sends the same household with `explain: true`.
 
 The explanation object has only `mode` and `text`:
 
@@ -329,7 +329,7 @@ In production, Express serves the Vite build from `dist/` and the API on the sam
 1. Install and start the app with the commands in [Run locally](#run-locally). Leave `AI_API_KEY` empty for the deterministic path.
 2. Open `http://localhost:5173`. Chennai loads without granting location on a first visit. If this browser has already allowed location, the current place appears with a GPS badge and no permission banner. The overview shows a modelled US AQI estimate, retrieval timing, and activity guidance. The hourly forecast, GoWindow, Family, pollutants, and assistant sections start collapsed.
 3. Open GoWindow from its header or the navigation link. Change activity, duration, or time preference, then choose a duration from 15 to 180 minutes and request windows. Compare a returned window with the current overview: the window does not rewrite the current recommendation.
-4. Open Family air plan. The default household is one young child, children's outdoor play, 45 minutes, and daytime. Change a count or routine, then choose **Update family plan**. The decision, outing windows, and walking and cycling results appear. No explanation is shown yet.
+4. Open Family air plan. The default household is one young child, children's outdoor play, 45 minutes, and daytime. Change a count or routine, then choose **Get the Latest Plan**. The decision, outing windows, and walking and cycling results appear. No explanation is shown yet.
 5. Choose **Explain using AI**. With no API key, the deterministic explanation appears without an origin label. With a key, an accepted reply is labelled **AI-generated**. A reply that fails validation is replaced by the deterministic explanation and is not labelled as AI-generated. The household decision on screen stays the one the exposure engine returned.
 6. Scroll down until **Back to top** appears at the bottom-right, then use it to return to the overview. Collapse a section you opened. Reload the tab and confirm that section choice is still there. Close the tab and open the app again: the saved place, household, and GoWindow activity settings should still be there. The forecast itself is fetched again.
 7. Use **Clear saved place**, **Reset household**, or **Reset activity settings** when those controls appear. Reload and confirm Chennai, the default household, and the default GoWindow profile return.

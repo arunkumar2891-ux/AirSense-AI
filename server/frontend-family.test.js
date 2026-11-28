@@ -377,7 +377,8 @@ test("family controls, persistence, and stale-result handling stay in the dashbo
   assert.match(panel, /aria-label="Preferred time of day"/);
   assert.match(panel, /aria-live="polite"/);
   assert.match(panel, /role="alert"/);
-  assert.match(panel, /Updating the family plan/);
+  assert.match(panel, /Get the Latest Plan/);
+  assert.match(panel, /Getting the latest plan/);
   assert.match(panel, /Checking the household forecast/);
   assert.match(panel, /Family plan unavailable/);
   assert.match(panel, /Insufficient data/);

@@ -163,7 +163,7 @@ export default function FamilyPanel({
         {!validation.ok && <p className="family-validation" id="family-validation" role="status">{validation.error}</p>}
         <div className="family-actions">
           <button className="primary-btn" type="submit" disabled={loading || !validation.ok} aria-busy={loading}>
-            {loading ? "Updating the family plan…" : "Update family plan"}
+            {loading ? "Getting the latest plan…" : "Get the Latest Plan"}
           </button>
           {canReset && <button className="quiet-btn" type="button" onClick={onReset}>Reset household</button>}
           <p>The plan is a modelled forecast estimate. It is not medical advice or a street-level measurement.</p>
@@ -172,7 +172,7 @@ export default function FamilyPanel({
       <div className="family-results" aria-live="polite">
         {loading && <p className="family-status" role="status">Checking the household forecast.</p>}
         {error && <div className="family-state error" role="alert"><b>Family plan unavailable</b><span>{error}</span></div>}
-        {!loading && !error && !result && <p className="family-status">Set the household, then update the family plan. No plan is shown until the forecast is checked.</p>}
+        {!loading && !error && !result && <p className="family-status">Set the household, then choose Get the Latest Plan. No plan is shown until the forecast is checked.</p>}
         {!loading && !error && result && !view.ok && <div className="family-state error" role="alert"><b>Family plan unavailable</b><span>{view.message}</span></div>}
         {!loading && !error && view.ok && <>
           <section className="family-block" aria-labelledby="family-outdoor-title">
