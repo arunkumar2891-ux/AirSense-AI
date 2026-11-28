@@ -5,10 +5,10 @@ Create a short, vertical (9:16) 4K launch-style brag video for AirSense AI (`216
 
 ## Output
 - Composition directory: `brag-output/composition/`
-- Rendered video: `brag-output/brag.mp4` (`2160x3840`, 30fps, 22.000s, frame 0 poster baked)
+- Rendered video: `brag-output/brag.mp4` (`2160x3840`, 30fps, 20.000s, frame 0 poster baked)
 - Poster image: `brag-output/brag.jpg` (`2160x3840`)
 - Format: `vertical` — `1080x1920` composition viewport, rendered at `portrait-4k` (`2160x3840`)
-- Duration: `22s`
+- Duration: `20s`
 
 ## Source Material
 - Project root: `/agent/repos/AirSense-AI`
@@ -61,24 +61,24 @@ Create a short, vertical (9:16) 4K launch-style brag video for AirSense AI (`216
 Use the storyboard in `brag-output/brag-plan.md` as the creative contract.
 
 Scene summary:
-1. `hook` — `4.39s` (`0.00s–4.39s`) — Frame 0 shows `AirSense AI` pill + `"One AQI number isn't a plan."`; at `1.09s` the `CURRENT MODELLED AIR QUALITY` card (`Sample forecast · Default · Chennai`, `US AQI 108`, `Unhealthy for Sensitive Groups`, `Running right now · 45 min · AVOID`) rises in and holds settled.
-2. `gowindow` — `7.07s` (`4.39s–11.46s`) — `GoWindow` profile (`Running · Adult · 45 minutes · Daytime`), simulated click on `Find my best time` (`5.34s`), 4 `ActivityTimeline` forecast blocks on the beat grid (`6.00s, 6.56s, 7.09s, 7.64s`), and `Best forecast window` (`4:00 PM – 4:45 PM · US AQI 39 · Good`) beat-locked to `8.74s`.
-3. `family` — `6.01s` (`11.46s–17.47s`) — `Family air plan` (`1 Young child · 2 Adults · 45 min · Daytime`) entering on `11.46s`, contrasting `Children's outdoor play` (`Now: Avoid` → `4:00 PM – 4:45 PM (Good)`) with `Adult-only commute: Caution` (`Does not apply to children · Walking & cycling separate`), then locking the `Explain using AI` guardrail (`"The decision is deterministic."` / `"The safety decision stays with the exposure engine."`) on `13.11s`.
-4. `outro` — `4.53s` (`17.47s–22.00s`) — `AirSense AI · URBAN AIR INTELLIGENCE` lockup (`17.47s`) and beat-locked tagline (`18.02s`) `"Understand the air you have. Choose a time that fits the activity."` holding dead still through `22.00s`.
+1. `hook` — `2.73s` (`0.00s–2.73s`) — Frame 0 shows `AirSense AI` pill + `"One AQI number isn't a plan."`; on Beat 1 (`0.56s`) the `CURRENT MODELLED AIR` card (`Sample forecast · Default · Chennai`, `US AQI 108`, `Unhealthy for Sensitive Groups`, `Running right now · 45 min · AVOID`) rises briskly and cuts cleanly at `2.73s`.
+2. `gowindow` — `7.10s` (`2.73s–9.83s`) — `GoWindow` profile (`Running · Adult · 45 minutes · Daytime`), simulated click on `Find my best time` (`3.82s`), 4 `ActivityTimeline` forecast blocks on the beat grid (`4.39s, 4.91s, 5.34s, 6.00s`), and enlarged mobile `Best forecast window` (`4:00 PM – 4:45 PM · US AQI 39 · Good`) beat-locked to `6.56s`.
+3. `family` — `6.01s` (`9.83s–15.84s`) — `Family air plan` (`1 Young child · 2 Adults · 45 min · Daytime`) entering on `9.83s`, contrasting enlarged mobile recommendation cards for `Children's outdoor play` (`Now: Avoid outdoor play` / `Window: 4:00 PM – 4:45 PM · Good`) and `Adult-only commute: Caution` (`Does not apply to children · Walking & cycling separate`), then locking the enlarged `Explain using AI` guardrail (`"The decision is deterministic."` / `"The safety decision stays with the exposure engine."`) on `12.55s`.
+4. `outro` — `4.16s` (`15.84s–20.00s`) — `AirSense AI · URBAN AIR INTELLIGENCE` lockup (`15.84s`) and beat-locked tagline (`16.38s`) `"Understand the air you have. Choose a time that fits the activity."` holding dead still through `20.00s`.
 
 ## Audio
 - Audio role: Steady, clean instrumental support with sparse tactile UI accents
-- Audio arc: Clean 110 BPM pulse from `0.0s` (`0.5s` fade-in), crisp click + warm reveal on GoWindow (`5.34s`, `8.74s`), soft card placement on Family (`11.46s`), gentle chime on the final lockup (`17.47s`), smooth `1.8s` fade-out to `22.0s`
+- Audio arc: Clean 110 BPM pulse from `0.0s` (`0.45s` fade-in), crisp click + warm reveal on GoWindow (`3.82s`, `6.56s`), soft card placement on Family (`9.83s`), gentle chime on the final lockup (`15.84s`), smooth `1.6s` fade-out to `20.0s`
 - Music: `happy-beats-business-moves-vol-12-by-ende-dot-app.mp3`
-- Music treatment: `data-volume="0.32"`, `data-fade-in="0.5"`, `data-fade-out="1.8"`
-- Music cue guidance: Bundled preset `.agents/skills/brag/assets/music/cues/happy-beats-business-moves-vol-12-by-ende-dot-app.music-cues.json` (`109.96 BPM`); strong cues `8.74s`, `11.46s`, `13.11s`, `17.47s`; beat grid `6.00s, 6.56s, 7.09s, 7.64s`
+- Music treatment: `data-volume="0.32"`, `data-fade-in="0.45"`, `data-fade-out="1.6"`
+- Music cue guidance: Bundled preset `.agents/skills/brag/assets/music/cues/happy-beats-business-moves-vol-12-by-ende-dot-app.music-cues.json` (`109.96 BPM`); beat cues `0.56s`, `2.73s`, `6.56s`, `9.83s`, `10.93s`, `12.55s`, `15.84s`; beat grid `4.39s, 4.91s, 5.34s, 6.00s`
 - Audio-reactive treatment: Subtle; extract 30fps RMS/band energy via `extract-audio-data.py` and drive subtle build-time breathing (`opacity` / `scale` within 3–6%) on the `#atmosphere` radial glow layer behind the cards
 - Audio-coupled moments:
-  - Scene 2 (`5.34s`) — simulated cursor click on `Find my best time` (`interface/click_003.ogg`)
-  - Scene 2 (`6.00s–7.64s`) — 4 forecast timeline blocks snapping onto `beats[]`
-  - Scene 2 (`8.74s`) — `Best forecast window` reveal (`impact/impactSoft_medium_001.ogg`)
-  - Scene 3 (`11.46s`) — `Family air plan` card entrance (`interface/drop_001.ogg`)
-  - Scene 4 (`17.47s`) — Outro lockup payoff (`interface/bong_001.ogg`)
+  - Scene 2 (`3.82s`) — simulated cursor click on `Find my best time` (`interface/click_003.ogg`)
+  - Scene 2 (`4.39s–6.00s`) — 4 forecast timeline blocks snapping onto `beats[]`
+  - Scene 2 (`6.56s`) — `Best forecast window` reveal (`impact/impactSoft_medium_001.ogg`)
+  - Scene 3 (`9.83s`) — `Family air plan` card entrance (`interface/drop_001.ogg`)
+  - Scene 4 (`15.84s`) — Outro lockup payoff (`interface/bong_001.ogg`)
 - SFX selection guidance: Low/medium HF risk sounds at restrained volumes (`0.36–0.46`) on non-overlapping or clean tracks
 - SFX analysis guidance: `.agents/skills/brag/assets/sfx/sfx-analysis.md`
 - Exact SFX choice: Hyperframes selects and copies exact files into `brag-output/composition/assets/sfx/`
