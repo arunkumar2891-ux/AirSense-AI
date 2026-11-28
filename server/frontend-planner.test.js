@@ -21,16 +21,11 @@ async function compile(relativePath, cache = new Map()) {
   return url;
 }
 
-test("no planner is chosen until the user picks one", async () => {
+test("no planner choice is saved or restored", async () => {
   const planner = await import(await compile("planner-mode.ts"));
-  const { readPlannerMode } = planner;
+  assert.equal(Object.hasOwn(planner, "readPlannerMode"), false);
   assert.equal(Object.hasOwn(planner, "DEFAULT_PLANNER_MODE"), false);
-  assert.equal(readPlannerMode(null), null);
-  assert.equal(readPlannerMode(undefined), null);
-  assert.equal(readPlannerMode(""), null);
-  assert.equal(readPlannerMode("both"), null);
-  assert.equal(readPlannerMode("self"), "self");
-  assert.equal(readPlannerMode("family"), "family");
+  assert.equal(planner.LEGACY_PLANNER_MODE_KEY, "airsense.plannerMode");
 });
 
 test("each planner mode maps to exactly one dashboard section", async () => {
@@ -43,15 +38,16 @@ test("each planner mode maps to exactly one dashboard section", async () => {
   for (const section of ["hourly", "pollutants", "assistant"]) assert.equal(plannerModeForSection(section), null);
 });
 
-test("the dashboard shows only the chosen planner and keeps the choice", async () => {
+test("the dashboard shows nothing until a card is clicked and never saves the choice", async () => {
   const app = await readFile(new URL("../src/App.tsx", import.meta.url), "utf8");
   const picker = await readFile(new URL("../src/PlannerModePicker.tsx", import.meta.url), "utf8");
-  assert.match(app, /useState<PlannerMode \| null>/);
+  assert.match(app, /useState<PlannerMode \| null>\(null\)/);
   assert.match(app, /plannerMode === "self" && <GoWindowPanel/);
   assert.match(app, /plannerMode === "family" && <FamilyPanel/);
-  assert.match(app, /writePreference\(localStorage, sessionStorage, PLANNER_MODE_KEY/);
-  assert.match(app, /readPlannerMode\(readPreference\(localStorage, sessionStorage, PLANNER_MODE_KEY\)\)/);
+  assert.match(app, /removePreference\(localStorage, sessionStorage, LEGACY_PLANNER_MODE_KEY\)/);
+  assert.doesNotMatch(app, /writePreference\([^)]*PLANNER/);
   assert.match(app, /const mode = plannerModeForSection\(id\)/);
-  assert.match(picker, /type="radio"/);
-  assert.match(picker, /name="planner-mode"/);
+  assert.match(picker, /<button/);
+  assert.match(picker, /aria-pressed=\{selected\}/);
+  assert.doesNotMatch(picker, /type="radio"|<input/);
 });

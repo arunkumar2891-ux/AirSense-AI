@@ -9,7 +9,7 @@ import { FAMILY_STORAGE_KEY, buildFamilyPlanRequest, canApplyFamilyExplanation, 
 import { expandSection, readSectionExpanded, sectionFromHash, toggleSection, writeSectionExpanded, type SectionId } from "./sections";
 import GoWindowPanel from "./GoWindowPanel";
 import PlannerModePicker from "./PlannerModePicker";
-import { PLANNER_MODE_KEY, plannerModeForSection, plannerSectionForMode, readPlannerMode, type PlannerMode } from "./planner-mode";
+import { LEGACY_PLANNER_MODE_KEY, plannerModeForSection, plannerSectionForMode, type PlannerMode } from "./planner-mode";
 import FamilyPanel from "./FamilyPanel";
 import CollapsibleSection from "./CollapsibleSection";
 import BackToTop from "./BackToTop";
@@ -118,14 +118,10 @@ function App() {
   const [sections, setSections] = useState(() => {
     try { return readSectionExpanded(sessionStorage); } catch { return readSectionExpanded(null); }
   });
-  const [plannerMode, setPlannerMode] = useState<PlannerMode | null>(() => {
-    try { return readPlannerMode(readPreference(localStorage, sessionStorage, PLANNER_MODE_KEY)); } catch { return null; }
-  });
+  const [plannerMode, setPlannerMode] = useState<PlannerMode | null>(null);
   const [clockNow, setClockNow] = useState(() => Date.now());
 
   function choosePlannerMode(mode: PlannerMode) {
-    setPlannerMode(mode);
-    writePreference(localStorage, sessionStorage, PLANNER_MODE_KEY, mode);
     openDashboardSection(plannerSectionForMode(mode));
   }
 
@@ -139,10 +135,7 @@ function App() {
 
   function openDashboardSection(id: SectionId) {
     const mode = plannerModeForSection(id);
-    if (mode) {
-      setPlannerMode(mode);
-      writePreference(localStorage, sessionStorage, PLANNER_MODE_KEY, mode);
-    }
+    if (mode) setPlannerMode(mode);
     setSections((current) => {
       const next = expandSection(current, id);
       if (next === current) return current;
@@ -150,6 +143,10 @@ function App() {
       return next;
     });
   }
+
+  useEffect(() => {
+    removePreference(localStorage, sessionStorage, LEGACY_PLANNER_MODE_KEY);
+  }, []);
 
   useEffect(() => {
     const openHashedSection = () => {

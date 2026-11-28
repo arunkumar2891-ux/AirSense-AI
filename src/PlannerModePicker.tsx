@@ -4,30 +4,27 @@ import { PLANNER_MODES, type PlannerMode } from "./planner-mode";
 const ICONS = { self: Clock, family: Users } as const;
 
 export default function PlannerModePicker({ mode, onChange }: { mode: PlannerMode | null; onChange: (mode: PlannerMode) => void }) {
-  return <fieldset className="planner-picker">
-    <legend className="section-kicker">PLAN YOUR DAY</legend>
+  return <section className="planner-picker" aria-labelledby="planner-title">
+    <h2 className="section-kicker" id="planner-title">PLAN YOUR DAY</h2>
     <div className="planner-cards">
       {PLANNER_MODES.map((item) => {
         const Icon = ICONS[item.id];
         const selected = item.id === mode;
-        return <label key={item.id} className={`planner-card${selected ? " selected" : ""}`}>
-          <input
-            className="planner-radio"
-            type="radio"
-            name="planner-mode"
-            value={item.id}
-            checked={selected}
-            onChange={() => onChange(item.id)}
-          />
+        return <button
+          key={item.id}
+          type="button"
+          className={`planner-card${selected ? " selected" : ""}`}
+          aria-pressed={selected}
+          onClick={() => onChange(item.id)}
+        >
           <span className="planner-card-icon" aria-hidden="true"><Icon size={20}/></span>
           <span className="planner-card-copy">
             <b>{item.title}</b>
             <small>{item.description}</small>
           </span>
-          <span className="planner-card-mark" aria-hidden="true"/>
-        </label>;
+        </button>;
       })}
     </div>
-    {mode === null && <p className="planner-hint">Choose one to see its plan.</p>}
-  </fieldset>;
+    {mode === null && <p className="planner-hint">Choose a card to see its plan.</p>}
+  </section>;
 }

@@ -1,6 +1,8 @@
 import type { SectionId } from "./sections";
 
-export const PLANNER_MODE_KEY = "airsense.plannerMode";
+// An earlier build saved the chosen card here. It is removed so no card is ever
+// selected before the user clicks one.
+export const LEGACY_PLANNER_MODE_KEY = "airsense.plannerMode";
 
 export type PlannerMode = "self" | "family";
 
@@ -23,11 +25,6 @@ export const PLANNER_MODES: readonly {
     sectionId: "family",
   },
 ];
-
-// No card is chosen until the user picks one, so an unknown value is no choice.
-export function readPlannerMode(raw: string | null | undefined): PlannerMode | null {
-  return raw === "self" || raw === "family" ? raw : null;
-}
 
 export function plannerModeForSection(id: SectionId): PlannerMode | null {
   return PLANNER_MODES.find((mode) => mode.sectionId === id)?.id ?? null;
